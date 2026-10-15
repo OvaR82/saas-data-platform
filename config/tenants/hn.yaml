@@ -1,0 +1,4 @@
+tenant:
+  code: hn
+  name: Honduras
+  enabled: true

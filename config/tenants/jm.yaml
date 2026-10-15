@@ -1,0 +1,4 @@
+tenant:
+  code: jm
+  name: Jamaica
+  enabled: true

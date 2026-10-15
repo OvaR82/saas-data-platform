@@ -1,0 +1,4 @@
+tenant:
+  code: gt
+  name: Guatemala
+  enabled: true

@@ -1,0 +1,34 @@
+# Shared defaults. Precedence (low -> high): base -> env/<env> -> tenants/<tenant> -> CLI.
+env: dev
+
+paths:
+  root: data
+  raw: data/raw  # RAW is read-only input and shared by every environment
+  bronze: ${paths.root}/bronze
+  silver: ${paths.root}/silver
+  gold: ${paths.root}/gold
+  quarantine_root: ${paths.root}
+  quality_logs: ${paths.root}/shared/quality_logs
+
+sources:
+  deliveries: global_mobility_data_entrega_productos.csv
+  materials: materials_catalog.csv
+
+execution:
+  start_date: "2025-01-01"
+  end_date: "2025-06-30"
+  tenant: all
+  fail_fast: false
+
+quality:
+  fail_on_critical: false
+
+business:
+  units_per_case: 20
+  routine_delivery_types: [ZPRE, ZVE1]
+  bonus_delivery_types: [Z04, Z05]
+
+# Filled by the tenant file (config/tenants/<code>.yaml)
+tenant:
+  code: ???
+  enabled: true

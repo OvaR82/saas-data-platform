@@ -1,0 +1,5 @@
+# Local dev keeps the paths documented in the architecture (data/<layer>/<tenant>/...).
+env: dev
+
+paths:
+  root: data
