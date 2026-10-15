@@ -22,6 +22,7 @@ execution:
 
 quality:
   fail_on_critical: false
+  max_quarantine_rate: 0.05  # warning above 5% of the rows read in Silver
 
 business:
   units_per_case: 20
