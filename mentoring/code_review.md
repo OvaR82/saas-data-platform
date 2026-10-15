@@ -112,10 +112,10 @@ df.write.format("delta").mode("overwrite") \
 **Qué está mal.** Los tipos `"ZPRE"`/`"ZVE1"` (línea 11), el factor `20` (línea 13), la ruta
 `/tmp/output/` (línea 25) y la llamada con `"data.csv"`, `"GT"` (línea 29).
 
-**Por qué importa.** Cambiar un tipo de entrega, el factor de un país o el ambiente obliga a
+**Por qué importa.** Cambiar el tipo de entrega, el factor de un país o el ambiente obliga a
 modificar y redesplegar código. Es fácil que dos scripts terminen con reglas distintas.
 
-**Cómo se corrige.** Leerlos de la configuración del proyecto (`business.routine_delivery_types`,
+**Cómo se corrige.** Leerlos desde la configuración del proyecto (`business.routine_delivery_types`,
 `business.units_per_case`, `paths.*`), que además cambia por ambiente y por tenant.
 
 ## 6. Ejecuta trabajo al importar el módulo — **Media**
@@ -147,7 +147,7 @@ errores de redondeo se acumulan en los ingresos. `fecha_proceso` queda como text
 (línea 8).
 
 **Por qué importa.** La convención de la plataforma es el código de tenant en minúscula; si alguien
-pasa `gt`, el resultado es vacío (ver observación 3). Agregar un país implica tocar el script.
+pasa `gt`, el resultado es vacío (ver observación 3). Agregar un país implica tener que tocar el script.
 
 **Cómo se corrige.** Recibir el tenant por argumento, validarlo contra la configuración y
 normalizar la columna de origen (`lower(trim(pais))`) antes de comparar.
@@ -159,7 +159,7 @@ normalizar la columna de origen (`lower(trim(pais))`) antes de comparar.
   ingreso), `out`, `sdf`; la variable `i` (línea 10) no se usa.
 - Sin type hints ni docstring en `process` (línea 6).
 - `print("done")` (línea 26) en lugar de `logging`.
-- La función lee, transforma, escribe **y** devuelve un DataFrame de pandas: hace cuatro cosas.
+- La función lee, transforma, escribe **y** devuelve un DataFrame de pandas: en total hace cuatro cosas a la vez.
 
 **Por qué importa.** El código se lee más veces de las que se escribe; nombres claros y funciones
 con una sola responsabilidad hacen que el siguiente cambio sea seguro.
