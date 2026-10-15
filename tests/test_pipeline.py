@@ -16,6 +16,7 @@ def _counts(spark, cfg):
         "dim": table_path(cfg, "silver", silver.DIM_TABLE),
         "quarantine": quarantine_path(cfg, "silver", silver.FACT_TABLE),
         "gold": table_path(cfg, "gold", gold.TABLE),
+        "gold_top": table_path(cfg, "gold", gold.TOP_TABLE),
     }
     return {name: spark.read.format("delta").load(path).count() for name, path in paths.items()}
 
@@ -49,5 +50,6 @@ def test_fail_on_critical_stops_before_gold(spark, make_cfg, monkeypatch):
 
     # Gold was never written, but the failed check was still logged.
     assert not Path(table_path(cfg, "gold", gold.TABLE)).exists()
+    assert not Path(table_path(cfg, "gold", gold.TOP_TABLE)).exists()
     logged = spark.read.format("delta").load(cfg.paths.quality_logs)
     assert logged.filter("check_name = 'forced'").count() == 1
