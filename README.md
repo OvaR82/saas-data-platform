@@ -23,3 +23,17 @@ sudo apt install -y openjdk-17-jdk make
 curl -LsSf https://astral.sh/uv/install.sh | sh
 make setup
 ```
+
+En Windows se usa WSL2 (Ubuntu 24.04). El código puede vivir en el disco de Windows
+(`/mnt/<unidad>/...`); para que el entorno virtual quede en el filesystem de Linux, que es más rápido:
+
+```bash
+export UV_PROJECT_ENVIRONMENT=$HOME/.venvs/saas-data-platform
+```
+
+## Uso rápido
+
+```bash
+make lint && make validate-config && make test
+make run ENV=dev TENANT=sv START=2025-01-01 END=2025-06-30 LAYERS=bronze
+```
