@@ -82,9 +82,9 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     end = to_partition_value(cfg.execution.end_date)
 
     raw = read_raw(spark, f"{cfg.paths.raw}/{cfg.sources.deliveries}")
-    rows, quarantine = split_by_process_date(
-        add_technical_columns(raw, tenant, batch_id), start, end
-    )
+    # Cached: read once for both writes and the counts (also keeps one _ingestion_timestamp).
+    tenant_rows = add_technical_columns(raw, tenant, batch_id).cache()
+    rows, quarantine = split_by_process_date(tenant_rows, start, end)
 
     overwrite_date_range(rows, table_path(cfg, "bronze", TABLE), start, end)
     # Undated rows do not belong to any date range, so the tenant's bronze quarantine is rebuilt
@@ -92,5 +92,6 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     overwrite_table(quarantine, quarantine_path(cfg, "bronze", TABLE))
 
     metrics = {"written": rows.count(), "quarantined": quarantine.count()}
+    tenant_rows.unpersist()
     log.info("[%s] bronze.%s %s", tenant, TABLE, metrics)
     return metrics

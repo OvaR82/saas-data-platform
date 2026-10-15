@@ -184,7 +184,8 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     valid_types = [*cfg.business.routine_delivery_types, *cfg.business.bonus_delivery_types]
     in_scope = deduplicated.filter(F.trim("tipo_entrega").isin(*valid_types))
 
-    fact = build_fact(in_scope, dim, cfg).withColumn("_batch_id", F.lit(batch_id))
+    # Cached: the join feeds the MERGE, the quarantine write and the counts.
+    fact = build_fact(in_scope, dim, cfg).withColumn("_batch_id", F.lit(batch_id)).cache()
     valid, quarantine = split_anomalies(fact)
 
     merge_into(
@@ -205,5 +206,6 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
         "quarantined": quarantine.count(),
         "written": valid.count(),
     }
+    fact.unpersist()
     log.info("[%s] silver.%s %s", tenant, FACT_TABLE, metrics)
     return metrics
