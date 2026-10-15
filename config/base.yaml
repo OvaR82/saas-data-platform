@@ -2,7 +2,10 @@
 env: dev
 
 paths:
-  root: data
+  # Base folder for generated layers. Defaults to ./data; set SAAS_DATA_ROOT to write elsewhere
+  # (e.g. the Linux filesystem in WSL, much faster than /mnt/<drive>).
+  data_root: ${oc.env:SAAS_DATA_ROOT,data}
+  root: ${paths.data_root}
   raw: data/raw  # RAW is read-only input and shared by every environment
   bronze: ${paths.root}/bronze
   silver: ${paths.root}/silver

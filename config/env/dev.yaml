@@ -1,5 +1,6 @@
-# Local dev keeps the paths documented in the architecture (data/<layer>/<tenant>/...).
+# dev writes directly under the data root, with the paths documented in the architecture:
+# <data_root>/<layer>/<tenant>/<table>/...
 env: dev
 
 paths:
-  root: data
+  root: ${paths.data_root}

@@ -23,7 +23,8 @@ def test_every_env_and_tenant_loads(env):
         assert cfg.tenant.code == tenant
 
 
-def test_paths_change_per_env_and_follow_architecture():
+def test_paths_change_per_env_and_follow_architecture(monkeypatch):
+    monkeypatch.delenv("SAAS_DATA_ROOT", raising=False)
     dev = load_config("dev", "sv", config_dir=CONFIG_DIR)
     qa = load_config("qa", "sv", config_dir=CONFIG_DIR)
     assert table_path(dev, "bronze", "deliveries") == "data/bronze/sv/deliveries"
@@ -32,6 +33,16 @@ def test_paths_change_per_env_and_follow_architecture():
         "data/silver_quarantine/sv/fact_deliveries"
     )
     assert dev.paths.raw == qa.paths.raw  # RAW input is shared across environments
+
+
+def test_data_root_can_be_moved_with_an_environment_variable(monkeypatch):
+    monkeypatch.setenv("SAAS_DATA_ROOT", "/tmp/saas-data")
+    dev = load_config("dev", "sv", config_dir=CONFIG_DIR)
+    main = load_config("main", "sv", config_dir=CONFIG_DIR)
+    assert table_path(dev, "gold", "x") == "/tmp/saas-data/gold/sv/x"
+    assert dev.paths.quality_logs == "/tmp/saas-data/shared/quality_logs"
+    assert table_path(main, "gold", "x") == "/tmp/saas-data/main/gold/sv/x"
+    assert dev.paths.raw == "data/raw"  # inputs stay in the repository
 
 
 def test_cli_overrides_have_highest_precedence():

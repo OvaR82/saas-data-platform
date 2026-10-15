@@ -1,4 +1,4 @@
 env: qa
 
 paths:
-  root: data/qa
+  root: ${paths.data_root}/qa
