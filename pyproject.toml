@@ -18,6 +18,8 @@ dev = [
     "pytest==8.3.3",
     "ruff==0.7.4",
     "pre-commit==4.0.1",
+    "jupyterlab==4.3.1",  # demo notebook (notebooks/demo.ipynb)
+    "ipykernel==6.29.5",
 ]
 
 [build-system]
