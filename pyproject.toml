@@ -36,6 +36,7 @@ extend-exclude = ["mentoring/bad_code.py"]
 [tool.ruff.lint]
 # pycodestyle (PEP8), pyflakes, isort, pep8-naming, bugbear, pyupgrade, simplify
 select = ["E", "W", "F", "I", "N", "B", "UP", "SIM"]
+ignore = ["N812"]  # `from pyspark.sql import functions as F` is the PySpark idiom
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
