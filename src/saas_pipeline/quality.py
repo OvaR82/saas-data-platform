@@ -54,7 +54,10 @@ def _result(layer, table, name, severity, checked, failed, passed=None) -> Check
 
 
 def check_unique_business_key(fact: DataFrame, keys: tuple[str, ...]) -> CheckResult:
-    """MERGE relies on the key being unique; duplicates would make it ambiguous."""
+    """Count fact rows whose business key is repeated (critical).
+
+    MERGE relies on the key being unique; duplicates would make it ambiguous.
+    """
     duplicated = fact.groupBy(*keys).count().filter("count > 1")
     # Rows involved in a duplicated key (0 when there is none).
     failed = duplicated.agg(F.coalesce(F.sum("count"), F.lit(0))).first()[0]
@@ -64,7 +67,10 @@ def check_unique_business_key(fact: DataFrame, keys: tuple[str, ...]) -> CheckRe
 
 
 def check_material_enriched(fact: DataFrame) -> CheckResult:
-    """Every fact row must have found its catalog version in the temporal join."""
+    """Count fact rows without catalog attributes (critical).
+
+    Every fact row must have found its material version in the temporal join.
+    """
     # categoria comes from the dimension, so null means the join found no version.
     failed = fact.filter(F.col("categoria").isNull()).count()
     return _result(
@@ -73,7 +79,7 @@ def check_material_enriched(fact: DataFrame) -> CheckResult:
 
 
 def check_single_current_version(dim: DataFrame) -> CheckResult:
-    """SCD2 invariant: exactly one is_current = true per material."""
+    """Count materials without exactly one current version (critical SCD2 invariant)."""
     # Number of current versions per SKU; checked per material, not per row.
     per_material = dim.groupBy("material").agg(F.sum(F.col("is_current").cast("int")).alias("n"))
     failed = per_material.filter("n != 1").count()
@@ -83,8 +89,10 @@ def check_single_current_version(dim: DataFrame) -> CheckResult:
 
 
 def check_no_overlapping_versions(dim: DataFrame) -> CheckResult:
-    """SCD2 invariant: versions of a material must not overlap, otherwise the temporal join
-    would duplicate fact rows."""
+    """Count versions that overlap the previous one of the same material (critical).
+
+    Overlapping versions would make the temporal join duplicate fact rows.
+    """
     # Compare each version with the previous one of the same SKU: it must start after the
     # previous one ends. (Spark does not allow window functions directly inside a filter.)
     previous_end = F.lag("valid_to").over(Window.partitionBy("material").orderBy("valid_from"))
@@ -96,7 +104,10 @@ def check_no_overlapping_versions(dim: DataFrame) -> CheckResult:
 
 
 def check_reconciliation(metrics: dict[str, int]) -> CheckResult:
-    """Nothing is lost silently: read = duplicates + discarded + quarantined + written."""
+    """Verify that no row is lost silently (critical).
+
+    read = duplicates + discarded + quarantined + written.
+    """
     accounted = sum(metrics[k] for k in ("duplicates", "discarded", "quarantined", "written"))
     failed = abs(metrics["read"] - accounted)
     return _result(
@@ -105,7 +116,10 @@ def check_reconciliation(metrics: dict[str, int]) -> CheckResult:
 
 
 def check_quarantine_rate(metrics: dict[str, int], max_rate: float) -> CheckResult:
-    """A spike in quarantined rows usually means a broken source, not bad luck."""
+    """Warn when the share of quarantined rows exceeds `max_rate`.
+
+    A spike in quarantined rows usually means a broken source, not bad luck.
+    """
     read, quarantined = metrics["read"], metrics["quarantined"]
     # An empty range is not a failure; otherwise compare against the configured threshold.
     passed = read == 0 or quarantined / read <= max_rate
@@ -115,7 +129,10 @@ def check_quarantine_rate(metrics: dict[str, int], max_rate: float) -> CheckResu
 
 
 def check_discarded_delivery_types(metrics: dict[str, int]) -> CheckResult:
-    """Discards are a business rule (COBR, Z99): counted, never persisted."""
+    """Record how many rows were discarded by delivery type (info, always passes).
+
+    Discards are a business rule (COBR, Z99): counted, never persisted.
+    """
     return _result(
         "silver",
         "fact_deliveries",
@@ -128,7 +145,7 @@ def check_discarded_delivery_types(metrics: dict[str, int]) -> CheckResult:
 
 
 def check_bronze_process_date(metrics: dict[str, int]) -> CheckResult:
-    """Rows without a valid fecha_proceso were sent to bronze_quarantine."""
+    """Warn about rows sent to bronze_quarantine for lacking a valid fecha_proceso."""
     return _result(
         "bronze",
         "deliveries",
@@ -165,7 +182,10 @@ def write_quality_logs(
     batch_id: str,
     tenant: str,
 ) -> None:
-    """Append-only audit trail: each run adds its own rows (identified by _run_id)."""
+    """Append the check results of one tenant to the quality_logs Delta table.
+
+    Append-only audit trail: each run adds its own rows (identified by _run_id).
+    """
     if not results:
         return
     # One row per check, in the column order of QUALITY_LOG_COLUMNS.

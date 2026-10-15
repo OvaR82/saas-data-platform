@@ -20,12 +20,14 @@ CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
 @pytest.mark.parametrize("env", ENVIRONMENTS)
 def test_every_env_and_tenant_loads(env):
+    """Every tenant YAML loads and validates in every environment."""
     for tenant in available_tenants(CONFIG_DIR):
         cfg = load_config(env, tenant, config_dir=CONFIG_DIR)
         assert cfg.tenant.code == tenant
 
 
 def test_paths_change_per_env_and_follow_architecture(monkeypatch):
+    """Default paths follow architecture 5.2 and differ per environment."""
     # Ignore a SAAS_DATA_ROOT set on the developer's machine: assert the defaults.
     monkeypatch.delenv("SAAS_DATA_ROOT", raising=False)
     dev = load_config("dev", "sv", config_dir=CONFIG_DIR)
@@ -39,6 +41,7 @@ def test_paths_change_per_env_and_follow_architecture(monkeypatch):
 
 
 def test_data_root_can_be_moved_with_an_environment_variable(monkeypatch):
+    """SAAS_DATA_ROOT relocates the generated layers but not the RAW inputs."""
     monkeypatch.setenv("SAAS_DATA_ROOT", "/tmp/saas-data")
     dev = load_config("dev", "sv", config_dir=CONFIG_DIR)
     main = load_config("main", "sv", config_dir=CONFIG_DIR)
@@ -49,6 +52,7 @@ def test_data_root_can_be_moved_with_an_environment_variable(monkeypatch):
 
 
 def test_cli_overrides_have_highest_precedence():
+    """CLI overrides beat base, env and tenant files."""
     # main.yaml sets fail_on_critical=true; the CLI override must win.
     cfg = load_config(
         "main",
@@ -61,6 +65,7 @@ def test_cli_overrides_have_highest_precedence():
 
 
 def test_invalid_inputs_are_rejected():
+    """Bad env, unknown tenant and an inverted date range raise ConfigError."""
     # Unknown environment.
     with pytest.raises(ConfigError):
         load_config("prod", "sv", config_dir=CONFIG_DIR)
@@ -73,4 +78,5 @@ def test_invalid_inputs_are_rejected():
 
 
 def test_partition_value_format():
+    """Config dates are converted to the fecha_proceso partition format."""
     assert to_partition_value("2025-03-14") == "20250314"

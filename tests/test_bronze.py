@@ -7,6 +7,7 @@ from saas_pipeline.config import table_path
 
 
 def test_process_date_validation_rejects_null_iso_and_impossible_dates(spark):
+    """Only real yyyyMMdd calendar dates are accepted as fecha_proceso."""
     # One valid date followed by every invalid shape found in the real dataset.
     values = ["20250314", "20250230", "20251332", "00000000", "2025-03-15", None]
     df = spark.createDataFrame([(v,) for v in values], "fecha_proceso string")
@@ -15,6 +16,7 @@ def test_process_date_validation_rejects_null_iso_and_impossible_dates(spark):
 
 
 def test_technical_columns_and_tenant_normalization(spark):
+    """Rows are routed to the tenant by normalized pais and get the technical columns."""
     # 'SV' and ' sv ' belong to tenant sv after trim + lowercase; 'HN' is filtered out.
     df = spark.createDataFrame([("SV",), (" sv ",), ("HN",)], "pais string")
     out = bronze.add_technical_columns(df, "sv", "batch-1").collect()
@@ -25,6 +27,7 @@ def test_technical_columns_and_tenant_normalization(spark):
 
 
 def test_split_by_process_date(spark):
+    """Rows are split into in-range rows and quarantined rows with their reason."""
     # In range, out of range (dropped for this run), null and invalid (quarantined).
     df = spark.createDataFrame(
         [("20250301",), ("20250401",), (None,), ("2025-03-15",)], "fecha_proceso string"
@@ -36,6 +39,7 @@ def test_split_by_process_date(spark):
 
 
 def test_bronze_rerun_is_idempotent(spark, make_cfg):
+    """Running Bronze twice for the same range does not duplicate rows."""
     cfg = make_cfg()
     path = table_path(cfg, "bronze", bronze.TABLE)
 
@@ -50,6 +54,7 @@ def test_bronze_rerun_is_idempotent(spark, make_cfg):
 
 
 def test_bronze_range_rerun_only_touches_that_range(spark, make_cfg):
+    """Reprocessing one month rewrites that month only."""
     # Load the whole semester, then reprocess only March.
     bronze.run(spark, make_cfg(), "full")
     march = make_cfg("execution.start_date=2025-03-01", "execution.end_date=2025-03-31")

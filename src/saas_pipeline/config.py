@@ -23,7 +23,10 @@ class ConfigError(ValueError):
 
 
 def available_tenants(config_dir: Path = DEFAULT_CONFIG_DIR) -> list[str]:
-    """Tenants are onboarded by adding config/tenants/<code>.yaml (enabled: true)."""
+    """List the enabled tenant codes.
+
+    A tenant is onboarded by adding config/tenants/<code>.yaml (enabled: true).
+    """
     tenants = []
     for path in sorted((config_dir / "tenants").glob("*.yaml")):
         # A disabled tenant keeps its YAML but is skipped by --tenant all.
@@ -88,15 +91,21 @@ def _validate(cfg: DictConfig, tenant: str) -> None:
 
 
 def to_partition_value(iso_date: str) -> str:
-    """'2025-03-14' -> '20250314' (format of fecha_proceso)."""
+    """Convert a config date to the fecha_proceso format: '2025-03-14' -> '20250314'."""
     return date.fromisoformat(iso_date).strftime("%Y%m%d")
 
 
 def table_path(cfg: DictConfig, layer: str, table: str) -> str:
-    """<paths.layer>/<tenant>/<table>, e.g. data/silver/sv/fact_deliveries."""
+    """Build the path of a tenant table: <paths.layer>/<tenant>/<table>.
+
+    Example: data/silver/sv/fact_deliveries.
+    """
     return f"{cfg.paths[layer]}/{cfg.tenant.code}/{table}"
 
 
 def quarantine_path(cfg: DictConfig, layer: str, table: str) -> str:
-    """<quarantine_root>/<layer>_quarantine/<tenant>/<table>."""
+    """Build the path of a quarantine table.
+
+    Layout: <quarantine_root>/<layer>_quarantine/<tenant>/<table>.
+    """
     return f"{cfg.paths.quarantine_root}/{layer}_quarantine/{cfg.tenant.code}/{table}"

@@ -53,8 +53,11 @@ def read_catalog(spark: SparkSession, path: str) -> DataFrame:
 
 
 def prepare_dim_materials(catalog: DataFrame) -> DataFrame:
-    """One row per version (material, valid_from). is_current is derived from valid_to:
-    the flag shipped in the CSV is informative, not the source of truth."""
+    """Prepare the catalog versions to merge into dim_materials.
+
+    Keeps one row per version (material, valid_from) and derives is_current from
+    valid_to: the flag shipped in the CSV is informative, not the source of truth.
+    """
     return catalog.dropDuplicates(list(DIM_KEY)).withColumn(
         "is_current", F.col("valid_to") == F.lit(OPEN_END)
     )
@@ -64,7 +67,10 @@ def prepare_dim_materials(catalog: DataFrame) -> DataFrame:
 
 
 def cast_types(df: DataFrame) -> DataFrame:
-    """Bronze strings -> business types. fecha_proceso stays as yyyymmdd (partition key)."""
+    """Convert Bronze strings to business types and keep the lineage columns.
+
+    fecha_proceso stays as yyyymmdd (partition key); fecha_proceso_date is added as date.
+    """
     return df.select(
         # Business columns. A value that cannot be cast becomes null and the quarantine
         # rules catch it (null_cantidad, null_precio, null_business_key).
@@ -86,7 +92,7 @@ def cast_types(df: DataFrame) -> DataFrame:
 
 
 def normalize_units(df: DataFrame, units_per_case: int) -> DataFrame:
-    """cantidad_normalizada_st: everything in ST (1 CS = units_per_case ST)."""
+    """Add cantidad_normalizada_st: the quantity in ST (1 CS = units_per_case ST)."""
     # Any other unit yields null and is quarantined as invalid_unidad.
     qty = F.when(F.col("unidad") == "CS", F.col("cantidad") * units_per_case).when(
         F.col("unidad") == "ST", F.col("cantidad")
@@ -102,7 +108,10 @@ def add_delivery_flags(df: DataFrame, routine: list[str], bonus: list[str]) -> D
 
 
 def enrich_with_materials(fact: DataFrame, dim: DataFrame) -> DataFrame:
-    """Temporal join: the material version valid on fecha_proceso, not the current one."""
+    """Add the catalog attributes valid on fecha_proceso (temporal join, not is_current).
+
+    Also adds _material_found, used by the quarantine rules and dropped afterwards.
+    """
     # Rename the dim key to avoid an ambiguous `material` column after the join.
     versions = dim.select(
         F.col("material").alias("_dim_material"),
@@ -126,7 +135,7 @@ def enrich_with_materials(fact: DataFrame, dim: DataFrame) -> DataFrame:
 
 
 def _flag(condition: Column) -> Column:
-    """Null-safe rule: a comparison against null counts as 'not matched'."""
+    """Make a rule null-safe: a comparison against null counts as 'not matched'."""
     return F.coalesce(condition, F.lit(False))
 
 
@@ -146,8 +155,11 @@ def quarantine_rules() -> list[tuple[str, Column]]:
 
 
 def split_anomalies(df: DataFrame) -> tuple[DataFrame, DataFrame]:
-    """Return (valid rows, quarantined rows). Every matching reason is kept in
-    _quarantine_reason, separated by ';', so one row is never hidden behind another reason."""
+    """Split rows into (valid, quarantined) by applying every quarantine rule.
+
+    Every matching reason is kept in _quarantine_reason, separated by ';', so a
+    problem is never hidden behind another one.
+    """
     # One entry per matching rule (null when it does not match), nulls removed afterwards.
     reasons = F.array_compact(
         F.array(*[F.when(_flag(rule), F.lit(name)) for name, rule in quarantine_rules()])
@@ -160,7 +172,10 @@ def split_anomalies(df: DataFrame) -> tuple[DataFrame, DataFrame]:
 
 
 def build_fact(deliveries: DataFrame, dim: DataFrame, cfg: DictConfig) -> DataFrame:
-    """Typed, normalized, flagged and enriched deliveries (before the anomaly split)."""
+    """Chain the Silver transformations: types, units, flags and temporal enrichment.
+
+    Returns every in-scope row; the anomaly split happens afterwards.
+    """
     business = cfg.business
     df = cast_types(deliveries)
     df = normalize_units(df, business.units_per_case)

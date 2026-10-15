@@ -12,6 +12,7 @@ METRICS = {"read": 100, "duplicates": 2, "discarded": 8, "quarantined": 5, "writ
 
 
 def test_scd2_checks_detect_overlaps_and_multiple_current_versions(spark):
+    """SCD2 checks catch overlapping versions and several current versions."""
     dim = spark.createDataFrame(
         [
             ("A", date(2024, 1, 1), date(2025, 3, 31), False),
@@ -28,6 +29,7 @@ def test_scd2_checks_detect_overlaps_and_multiple_current_versions(spark):
 
 
 def test_reconciliation_detects_lost_rows():
+    """Reconciliation fails when read rows are not fully accounted for."""
     assert quality.check_reconciliation(METRICS).check_passed
     # 5 rows unaccounted for.
     lost = quality.check_reconciliation({**METRICS, "written": 80})
@@ -35,12 +37,14 @@ def test_reconciliation_detects_lost_rows():
 
 
 def test_quarantine_rate_threshold():
+    """The quarantine-rate warning compares against the configured threshold."""
     # 5 quarantined out of 100 read = 5%.
     assert quality.check_quarantine_rate(METRICS, max_rate=0.05).check_passed
     assert not quality.check_quarantine_rate(METRICS, max_rate=0.04).check_passed
 
 
 def test_quality_logs_follow_the_architecture_schema(spark, tmp_path):
+    """quality_logs is written with the exact schema of architecture 5.9."""
     path = str(tmp_path / "quality_logs")
     results = [
         quality.check_reconciliation(METRICS),
@@ -67,6 +71,7 @@ def test_quality_logs_follow_the_architecture_schema(spark, tmp_path):
 
 
 def test_enforce_raises_only_when_configured():
+    """A critical failure only aborts when fail_on_critical is true."""
     failed = quality.check_reconciliation({**METRICS, "written": 0})
     quality.enforce([failed], "sv", fail_on_critical=False)  # only logs a warning
     with pytest.raises(quality.CriticalQualityError):

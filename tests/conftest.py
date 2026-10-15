@@ -22,6 +22,7 @@ def make_cfg(tmp_path):
     """Config for tenant `sv` writing into a temporary directory."""
 
     def _make(*overrides: str, tenant: str = "sv"):
+        """Build a config for `tenant` (default sv) with extra dotlist `overrides` applied."""
         # Outputs go to pytest's tmp_path; inputs are the real CSVs of the repository.
         base = [
             f"paths.root={tmp_path.as_posix()}",

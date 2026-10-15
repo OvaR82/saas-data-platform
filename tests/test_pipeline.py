@@ -21,6 +21,7 @@ def _counts(spark, cfg):
 
 
 def test_full_run_is_idempotent_and_logs_quality(spark, make_cfg):
+    """A full tenant run is idempotent and leaves passing critical checks in quality_logs."""
     cfg = make_cfg()
     # Two full runs over the same range must leave identical tables.
     run_tenant(spark, cfg, list(LAYER_ORDER), "run1")
@@ -37,6 +38,7 @@ def test_full_run_is_idempotent_and_logs_quality(spark, make_cfg):
 
 
 def test_fail_on_critical_stops_before_gold(spark, make_cfg, monkeypatch):
+    """With fail_on_critical, a failed critical check stops the tenant before Gold."""
     cfg = make_cfg("quality.fail_on_critical=true")
     # Force a failing critical check instead of corrupting real data.
     broken = quality.CheckResult("silver", "fact_deliveries", "forced", "critical", 1, 1, False)

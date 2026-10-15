@@ -18,7 +18,7 @@ TABLE = "daily_metrics_by_delivery_type"
 
 
 def build_daily_metrics(fact: DataFrame) -> DataFrame:
-    """One row per (tenant_id, fecha_proceso, tipo_entrega).
+    """Aggregate Silver facts into one row per (tenant_id, fecha_proceso, tipo_entrega).
 
     Revenue uses the transaction price (precio), not the catalog precio_base.
     """

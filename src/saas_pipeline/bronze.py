@@ -37,7 +37,10 @@ RAW_SCHEMA = StructType([StructField(name, StringType()) for name in SOURCE_COLU
 
 
 def read_raw(spark: SparkSession, path: str) -> DataFrame:
-    """Read the source CSV as strings; enforceSchema=False fails if the header changes."""
+    """Read the RAW deliveries CSV as strings and record the source file of each row.
+
+    enforceSchema=False makes the read fail if the header changes.
+    """
     return (
         spark.read.option("header", True)
         .option("enforceSchema", False)
@@ -48,7 +51,10 @@ def read_raw(spark: SparkSession, path: str) -> DataFrame:
 
 
 def is_valid_process_date(col: Column) -> Column:
-    """True only for real calendar dates in yyyyMMdd (rejects null, '2025-03-15', '20250230')."""
+    """Return a boolean column: true only for real calendar dates in yyyyMMdd.
+
+    Rejects null, '2025-03-15' (ISO format) and impossible dates such as '20250230'.
+    """
     parsed = F.to_date(col, "yyyyMMdd")
     # Exactly 8 digits AND a round trip that gives back the same text (so 20250230 fails).
     is_valid = col.rlike(r"^\d{8}$") & (F.date_format(parsed, "yyyyMMdd") == col)
@@ -57,7 +63,10 @@ def is_valid_process_date(col: Column) -> Column:
 
 
 def add_technical_columns(df: DataFrame, tenant: str, batch_id: str) -> DataFrame:
-    """Keep the tenant's rows, normalize pais to lowercase and add the technical columns."""
+    """Keep the tenant's rows, normalize pais to lowercase and add the technical columns.
+
+    Technical columns: _tenant_id, _ingestion_timestamp (UTC) and _batch_id.
+    """
     return (
         df.withColumn("pais", F.lower(F.trim("pais")))
         .filter(F.col("pais") == tenant)

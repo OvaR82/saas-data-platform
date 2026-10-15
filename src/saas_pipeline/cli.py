@@ -26,6 +26,7 @@ def _parse_layers(value: str) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define the CLI: `run` (execute the pipeline) and `validate-config` (check YAMLs)."""
     parser = argparse.ArgumentParser(prog="saas-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -59,6 +60,7 @@ def validate_all() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point of the `saas-pipeline` command: parse arguments and dispatch the command."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )

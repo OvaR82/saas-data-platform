@@ -18,7 +18,7 @@ def date_range_predicate(start: str, end: str, alias: str | None = None) -> str:
 def overwrite_date_range(
     df: DataFrame, path: str, start: str, end: str, partitioned: bool = True
 ) -> None:
-    """Idempotent write: replace only the fecha_proceso values in [start, end] (yyyymmdd).
+    """Write `df` replacing only the fecha_proceso values in [start, end] (yyyymmdd).
 
     Re-running the same range rewrites those rows instead of appending duplicates;
     rows outside the range are untouched.
@@ -35,7 +35,7 @@ def overwrite_date_range(
 
 
 def overwrite_table(df: DataFrame, path: str) -> None:
-    """Full overwrite, for small tables that are always rebuilt as a whole."""
+    """Replace the whole table; for small tables that are always rebuilt as a whole."""
     df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
 
 

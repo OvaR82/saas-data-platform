@@ -6,6 +6,7 @@ from pyspark.sql import SparkSession
 
 
 def get_spark(app_name: str = "saas-pipeline") -> SparkSession:
+    """Return the SparkSession to use, with Delta Lake enabled and UTC/strict-date settings."""
     # On Databricks (or inside tests) a session already exists and must be reused.
     spark = SparkSession.getActiveSession()
     if spark is None:

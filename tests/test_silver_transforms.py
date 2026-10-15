@@ -34,7 +34,6 @@ def dim(spark):
     return spark.createDataFrame(rows, DIM_COLUMNS)
 
 
-# Builds one already-typed fact row; each test only overrides the fields it cares about.
 def fact_row(
     fecha="20250314",
     tipo="ZPRE",
@@ -45,7 +44,10 @@ def fact_row(
     transporte=1,
     ruta=1,
 ):
+    """Return one typed fact row; each test overrides only the fields it cares about."""
+
     def to_decimal(value):
+        """Convert a string to Decimal, keeping None as null."""
         return None if value is None else Decimal(value)
 
     process_date = date(int(fecha[:4]), int(fecha[4:6]), int(fecha[6:]))
@@ -64,6 +66,7 @@ def fact_row(
 
 
 def test_normalize_units_converts_cases_to_units(spark):
+    """CS quantities are multiplied by 20; ST quantities are unchanged."""
     # 2 CS -> 40 ST; 2 ST stay 2.
     df = spark.createDataFrame([fact_row(unidad="CS"), fact_row(unidad="ST")], FACT_COLUMNS)
     out = silver.normalize_units(df, units_per_case=20).collect()
@@ -71,6 +74,7 @@ def test_normalize_units_converts_cases_to_units(spark):
 
 
 def test_delivery_flags(spark):
+    """Routine (ZPRE, ZVE1) and bonus (Z04, Z05) flags are set from the type."""
     rows = [fact_row(tipo=t) for t in ("ZPRE", "ZVE1", "Z04", "Z05")]
     df = spark.createDataFrame(rows, FACT_COLUMNS)
     out = silver.add_delivery_flags(df, ["ZPRE", "ZVE1"], ["Z04", "Z05"]).collect()
@@ -89,6 +93,7 @@ def test_temporal_join_uses_version_valid_on_process_date(spark, dim):
 
 
 def test_split_anomalies_quarantines_with_every_reason(spark, dim):
+    """Each anomaly goes to quarantine with every reason it matches."""
     rows = [
         fact_row(),  # valid
         fact_row(cantidad="0", ruta=2),
@@ -117,6 +122,7 @@ def test_split_anomalies_quarantines_with_every_reason(spark, dim):
 
 
 def test_dim_is_current_is_derived_from_valid_to(spark, dim):
+    """is_current is recomputed from valid_to, ignoring the source flag."""
     # Invert the source flags: the result must still follow valid_to.
     wrong_flags = dim.withColumn("is_current", ~dim.is_current)
     out = silver.prepare_dim_materials(wrong_flags).orderBy("valid_from").collect()
@@ -124,6 +130,7 @@ def test_dim_is_current_is_derived_from_valid_to(spark, dim):
 
 
 def test_gold_metrics_use_normalized_units_and_transaction_price(spark):
+    """Gold sums normalized units and revenue at the transaction price."""
     rows = [
         fact_row(precio="1.5", cantidad="2", unidad="CS", transporte=10),  # 40 ST
         fact_row(precio="2", cantidad="5", unidad="ST", transporte=11),  # 5 ST
