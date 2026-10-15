@@ -22,12 +22,14 @@ from saas_pipeline.session import get_spark
 
 log = logging.getLogger(__name__)
 
+# Execution order: each layer only reads the one before it.
 LAYER_ORDER = ("bronze", "silver", "gold")
 
 
 def _silver_checks(
     spark: SparkSession, cfg: DictConfig, metrics: dict[str, int]
 ) -> list[quality.CheckResult]:
+    """Run the Silver checks on what was actually persisted, not on in-memory DataFrames."""
     start = to_partition_value(cfg.execution.start_date)
     end = to_partition_value(cfg.execution.end_date)
     fact = (
@@ -40,7 +42,9 @@ def _silver_checks(
 
 
 def run_tenant(spark: SparkSession, cfg: DictConfig, layers: list[str], run_id: str) -> None:
+    """Bronze -> Silver -> quality gate -> Gold for a single tenant."""
     tenant = cfg.tenant.code
+    # run_id identifies the whole execution; batch_id the work of one tenant inside it.
     batch_id = f"{run_id}_{tenant}"
     checks: list[quality.CheckResult] = []
     try:
@@ -67,6 +71,7 @@ def run(
 ) -> int:
     """Run the pipeline; returns a process exit code (0 = every tenant succeeded)."""
     run_id = uuid.uuid4().hex[:12]
+    # Without --tenant, fall back to execution.tenant from base.yaml.
     if tenant_selection is None:
         tenant_selection = OmegaConf.load(config_dir / "base.yaml").execution.tenant
     tenants = resolve_tenants(tenant_selection, config_dir)
@@ -75,6 +80,7 @@ def run(
     spark = get_spark()
     log.info("run_id=%s env=%s tenants=%s layers=%s", run_id, env, tenants, layers)
 
+    # Tenants are isolated: one failure is logged and, unless fail_fast, the others continue.
     failed: list[str] = []
     for tenant, cfg in configs.items():
         try:
@@ -86,6 +92,7 @@ def run(
                 log.error("fail_fast=true: aborting the remaining tenants")
                 break
 
+    # Summary at the end, plus a non-zero exit code so a scheduler marks the job as failed.
     if failed:
         log.error("run_id=%s finished with failures: %s", run_id, failed)
         return 1

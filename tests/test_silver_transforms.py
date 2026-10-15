@@ -1,3 +1,5 @@
+"""Silver (and Gold) pure transformations, tested on small in-memory DataFrames."""
+
 from datetime import date
 from decimal import Decimal
 
@@ -5,6 +7,7 @@ import pytest
 
 from saas_pipeline import gold, silver
 
+# Schemas of the in-memory test DataFrames (same column names as the real tables).
 DIM_COLUMNS = (
     "material string, descripcion string, categoria string, precio_base decimal(38,18), "
     "valid_from date, valid_to date, is_current boolean"
@@ -31,6 +34,7 @@ def dim(spark):
     return spark.createDataFrame(rows, DIM_COLUMNS)
 
 
+# Builds one already-typed fact row; each test only overrides the fields it cares about.
 def fact_row(
     fecha="20250314",
     tipo="ZPRE",
@@ -60,6 +64,7 @@ def fact_row(
 
 
 def test_normalize_units_converts_cases_to_units(spark):
+    # 2 CS -> 40 ST; 2 ST stay 2.
     df = spark.createDataFrame([fact_row(unidad="CS"), fact_row(unidad="ST")], FACT_COLUMNS)
     out = silver.normalize_units(df, units_per_case=20).collect()
     assert [r.cantidad_normalizada_st for r in out] == [Decimal(40), Decimal(2)]
@@ -75,6 +80,7 @@ def test_delivery_flags(spark):
 
 def test_temporal_join_uses_version_valid_on_process_date(spark, dim):
     """Joining on is_current would price March at 60; the version valid in March is 57.5."""
+    # One delivery inside each of the three versions of DA030001.
     rows = [fact_row(fecha="20250115"), fact_row(fecha="20250314"), fact_row(fecha="20250620")]
     df = spark.createDataFrame(rows, FACT_COLUMNS)
     out = silver.enrich_with_materials(df, dim).orderBy("fecha_proceso").collect()
@@ -93,6 +99,7 @@ def test_split_anomalies_quarantines_with_every_reason(spark, dim):
         fact_row(material="XX999998", cantidad="0", ruta=7),  # two problems at once
         fact_row(unidad="KG", ruta=8),
     ]
+    # `ruta` identifies each case in the assertions below.
     df = silver.enrich_with_materials(spark.createDataFrame(rows, FACT_COLUMNS), dim)
     valid, quarantine = silver.split_anomalies(df)
 
@@ -110,6 +117,7 @@ def test_split_anomalies_quarantines_with_every_reason(spark, dim):
 
 
 def test_dim_is_current_is_derived_from_valid_to(spark, dim):
+    # Invert the source flags: the result must still follow valid_to.
     wrong_flags = dim.withColumn("is_current", ~dim.is_current)
     out = silver.prepare_dim_materials(wrong_flags).orderBy("valid_from").collect()
     assert [r.is_current for r in out] == [False, False, True]
@@ -121,6 +129,7 @@ def test_gold_metrics_use_normalized_units_and_transaction_price(spark):
         fact_row(precio="2", cantidad="5", unidad="ST", transporte=11),  # 5 ST
         fact_row(tipo="Z04", precio="3", cantidad="1", unidad="ST", ruta=2),
     ]
+    # Gold reads Silver, where cantidad_normalizada_st already exists.
     df = silver.normalize_units(spark.createDataFrame(rows, FACT_COLUMNS), 20)
     out = {r.tipo_entrega: r for r in gold.build_daily_metrics(df).collect()}
 

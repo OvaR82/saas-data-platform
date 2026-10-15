@@ -20,6 +20,7 @@ from saas_pipeline.storage import overwrite_date_range, overwrite_table
 log = logging.getLogger(__name__)
 
 TABLE = "deliveries"
+# Source contract: column names and order expected in the RAW CSV.
 SOURCE_COLUMNS = (
     "pais",
     "fecha_proceso",
@@ -31,6 +32,7 @@ SOURCE_COLUMNS = (
     "cantidad",
     "unidad",
 )
+# All strings: a malformed value is preserved as delivered instead of becoming null on read.
 RAW_SCHEMA = StructType([StructField(name, StringType()) for name in SOURCE_COLUMNS])
 
 
@@ -48,7 +50,9 @@ def read_raw(spark: SparkSession, path: str) -> DataFrame:
 def is_valid_process_date(col: Column) -> Column:
     """True only for real calendar dates in yyyyMMdd (rejects null, '2025-03-15', '20250230')."""
     parsed = F.to_date(col, "yyyyMMdd")
+    # Exactly 8 digits AND a round trip that gives back the same text (so 20250230 fails).
     is_valid = col.rlike(r"^\d{8}$") & (F.date_format(parsed, "yyyyMMdd") == col)
+    # A null input yields null; treat it as invalid.
     return F.coalesce(is_valid, F.lit(False))
 
 
@@ -66,7 +70,9 @@ def add_technical_columns(df: DataFrame, tenant: str, batch_id: str) -> DataFram
 def split_by_process_date(df: DataFrame, start: str, end: str) -> tuple[DataFrame, DataFrame]:
     """Return (rows in [start, end] with a valid date, rows with a null/invalid date)."""
     valid = is_valid_process_date(F.col("fecha_proceso"))
+    # yyyymmdd strings sort like dates, so a string BETWEEN is a correct range filter.
     in_range = df.filter(valid & F.col("fecha_proceso").between(start, end))
+    # Invalid dates are kept regardless of the range: they have no date to be filtered by.
     quarantine = df.filter(~valid).withColumn(
         "_quarantine_reason",
         F.when(F.col("fecha_proceso").isNull(), "null_fecha_proceso").otherwise(
@@ -77,7 +83,9 @@ def split_by_process_date(df: DataFrame, start: str, end: str) -> tuple[DataFram
 
 
 def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
+    """Ingest one tenant's rows for the configured date range and return the row counts."""
     tenant = cfg.tenant.code
+    # Config dates (YYYY-MM-DD) -> partition values (yyyymmdd).
     start = to_partition_value(cfg.execution.start_date)
     end = to_partition_value(cfg.execution.end_date)
 
@@ -86,11 +94,13 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     tenant_rows = add_technical_columns(raw, tenant, batch_id).cache()
     rows, quarantine = split_by_process_date(tenant_rows, start, end)
 
+    # Idempotent: re-running the range replaces its partitions instead of appending.
     overwrite_date_range(rows, table_path(cfg, "bronze", TABLE), start, end)
     # Undated rows do not belong to any date range, so the tenant's bronze quarantine is rebuilt
     # as a whole on each run (still idempotent).
     overwrite_table(quarantine, quarantine_path(cfg, "bronze", TABLE))
 
+    # Counts feed the bronze quality check (valid_fecha_proceso) and the run log.
     metrics = {"written": rows.count(), "quarantined": quarantine.count()}
     tenant_rows.unpersist()
     log.info("[%s] bronze.%s %s", tenant, TABLE, metrics)

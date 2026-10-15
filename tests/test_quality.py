@@ -1,3 +1,5 @@
+"""Quality checks: SCD2 invariants, reconciliation, thresholds, persistence and the gate."""
+
 from datetime import date
 
 import pytest
@@ -5,6 +7,7 @@ import pytest
 from saas_pipeline import quality
 
 DIM_COLUMNS = "material string, valid_from date, valid_to date, is_current boolean"
+# Counts that reconcile: 2 + 8 + 5 + 85 = 100.
 METRICS = {"read": 100, "duplicates": 2, "discarded": 8, "quarantined": 5, "written": 85}
 
 
@@ -26,11 +29,13 @@ def test_scd2_checks_detect_overlaps_and_multiple_current_versions(spark):
 
 def test_reconciliation_detects_lost_rows():
     assert quality.check_reconciliation(METRICS).check_passed
+    # 5 rows unaccounted for.
     lost = quality.check_reconciliation({**METRICS, "written": 80})
     assert (lost.records_failed, lost.check_passed, lost.severity) == (5, False, "critical")
 
 
 def test_quarantine_rate_threshold():
+    # 5 quarantined out of 100 read = 5%.
     assert quality.check_quarantine_rate(METRICS, max_rate=0.05).check_passed
     assert not quality.check_quarantine_rate(METRICS, max_rate=0.04).check_passed
 
@@ -43,6 +48,7 @@ def test_quality_logs_follow_the_architecture_schema(spark, tmp_path):
     ]
     quality.write_quality_logs(spark, results, path, "run1", "run1_sv", "sv")
 
+    # Exact column names and order of architecture 5.9.
     logs = spark.read.format("delta").load(path)
     assert logs.columns == [
         "_run_id",

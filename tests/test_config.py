@@ -1,3 +1,5 @@
+"""Hierarchical configuration: loading, precedence, paths and validation (no Spark needed)."""
+
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,7 @@ def test_every_env_and_tenant_loads(env):
 
 
 def test_paths_change_per_env_and_follow_architecture(monkeypatch):
+    # Ignore a SAAS_DATA_ROOT set on the developer's machine: assert the defaults.
     monkeypatch.delenv("SAAS_DATA_ROOT", raising=False)
     dev = load_config("dev", "sv", config_dir=CONFIG_DIR)
     qa = load_config("qa", "sv", config_dir=CONFIG_DIR)
@@ -46,6 +49,7 @@ def test_data_root_can_be_moved_with_an_environment_variable(monkeypatch):
 
 
 def test_cli_overrides_have_highest_precedence():
+    # main.yaml sets fail_on_critical=true; the CLI override must win.
     cfg = load_config(
         "main",
         "sv",
@@ -57,10 +61,13 @@ def test_cli_overrides_have_highest_precedence():
 
 
 def test_invalid_inputs_are_rejected():
+    # Unknown environment.
     with pytest.raises(ConfigError):
         load_config("prod", "sv", config_dir=CONFIG_DIR)
+    # Tenant without a YAML file.
     with pytest.raises(ConfigError):
         resolve_tenants("xx", CONFIG_DIR)
+    # start_date after the default end_date (2025-06-30).
     with pytest.raises(ConfigError):
         load_config("dev", "sv", ["execution.start_date=2025-07-01"], config_dir=CONFIG_DIR)
 

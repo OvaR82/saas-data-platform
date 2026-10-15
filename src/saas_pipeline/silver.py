@@ -24,11 +24,15 @@ log = logging.getLogger(__name__)
 
 FACT_TABLE = "fact_deliveries"
 DIM_TABLE = "dim_materials"
+# Same precision as the source (18 decimals): money and quantities are never floats.
 DECIMAL = DecimalType(38, 18)
+# valid_to of the version that is still in force.
 OPEN_END = date(9999, 12, 31)
 VALID_UNITS = ("CS", "ST")
+# Business keys used by the MERGE statements (architecture 5.5).
 FACT_KEY = ("tenant_id", "fecha_proceso", "transporte", "ruta", "material", "tipo_entrega")
 DIM_KEY = ("material", "valid_from")
+# Explicit schema with enforceSchema=False: a renamed or reordered column fails the read.
 CATALOG_SCHEMA = (
     "material string, descripcion string, categoria string, precio_base decimal(38,18), "
     "valid_from date, valid_to date, is_current boolean"
@@ -39,6 +43,7 @@ CATALOG_SCHEMA = (
 
 
 def read_catalog(spark: SparkSession, path: str) -> DataFrame:
+    """Read the materials catalog CSV already typed (dates, decimal price, boolean flag)."""
     return (
         spark.read.option("header", True)
         .option("enforceSchema", False)
@@ -61,6 +66,8 @@ def prepare_dim_materials(catalog: DataFrame) -> DataFrame:
 def cast_types(df: DataFrame) -> DataFrame:
     """Bronze strings -> business types. fecha_proceso stays as yyyymmdd (partition key)."""
     return df.select(
+        # Business columns. A value that cannot be cast becomes null and the quarantine
+        # rules catch it (null_cantidad, null_precio, null_business_key).
         F.col("_tenant_id").alias("tenant_id"),
         "fecha_proceso",
         F.to_date("fecha_proceso", "yyyyMMdd").alias("fecha_proceso_date"),
@@ -71,6 +78,7 @@ def cast_types(df: DataFrame) -> DataFrame:
         F.col("precio").cast(DECIMAL).alias("precio"),
         F.col("cantidad").cast(DECIMAL).alias("cantidad"),
         F.upper(F.trim("unidad")).alias("unidad"),
+        # Technical columns carried over from Bronze for lineage.
         "_source_file",
         "_ingestion_timestamp",
         "_tenant_id",
@@ -79,6 +87,7 @@ def cast_types(df: DataFrame) -> DataFrame:
 
 def normalize_units(df: DataFrame, units_per_case: int) -> DataFrame:
     """cantidad_normalizada_st: everything in ST (1 CS = units_per_case ST)."""
+    # Any other unit yields null and is quarantined as invalid_unidad.
     qty = F.when(F.col("unidad") == "CS", F.col("cantidad") * units_per_case).when(
         F.col("unidad") == "ST", F.col("cantidad")
     )
@@ -86,6 +95,7 @@ def normalize_units(df: DataFrame, units_per_case: int) -> DataFrame:
 
 
 def add_delivery_flags(df: DataFrame, routine: list[str], bonus: list[str]) -> DataFrame:
+    """is_routine_delivery / is_bonus_delivery from the delivery types listed in config."""
     return df.withColumn("is_routine_delivery", F.col("tipo_entrega").isin(*routine)).withColumn(
         "is_bonus_delivery", F.col("tipo_entrega").isin(*bonus)
     )
@@ -93,6 +103,7 @@ def add_delivery_flags(df: DataFrame, routine: list[str], bonus: list[str]) -> D
 
 def enrich_with_materials(fact: DataFrame, dim: DataFrame) -> DataFrame:
     """Temporal join: the material version valid on fecha_proceso, not the current one."""
+    # Rename the dim key to avoid an ambiguous `material` column after the join.
     versions = dim.select(
         F.col("material").alias("_dim_material"),
         "descripcion",
@@ -101,9 +112,12 @@ def enrich_with_materials(fact: DataFrame, dim: DataFrame) -> DataFrame:
         "valid_from",
         "valid_to",
     )
+    # Same SKU and fecha_proceso inside [valid_from, valid_to] (both ends inclusive).
     on = (F.col("material") == F.col("_dim_material")) & F.col("fecha_proceso_date").between(
         F.col("valid_from"), F.col("valid_to")
     )
+    # Left join: a row without a matching version is kept (and flagged) so it can be
+    # quarantined instead of disappearing silently.
     return (
         fact.join(versions, on, "left")
         .withColumn("_material_found", F.col("_dim_material").isNotNull())
@@ -134,10 +148,12 @@ def quarantine_rules() -> list[tuple[str, Column]]:
 def split_anomalies(df: DataFrame) -> tuple[DataFrame, DataFrame]:
     """Return (valid rows, quarantined rows). Every matching reason is kept in
     _quarantine_reason, separated by ';', so one row is never hidden behind another reason."""
+    # One entry per matching rule (null when it does not match), nulls removed afterwards.
     reasons = F.array_compact(
         F.array(*[F.when(_flag(rule), F.lit(name)) for name, rule in quarantine_rules()])
     )
     tagged = df.withColumn("_quarantine_reason", F.concat_ws(";", reasons)).drop("_material_found")
+    # An empty reason means the row passed every rule.
     valid = tagged.filter(F.col("_quarantine_reason") == "").drop("_quarantine_reason")
     quarantine = tagged.filter(F.col("_quarantine_reason") != "")
     return valid, quarantine
@@ -156,6 +172,7 @@ def build_fact(deliveries: DataFrame, dim: DataFrame, cfg: DictConfig) -> DataFr
 
 
 def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
+    """Build dim_materials and fact_deliveries for one tenant; return the reconciliation counts."""
     tenant = cfg.tenant.code
     start = to_partition_value(cfg.execution.start_date)
     end = to_partition_value(cfg.execution.end_date)
@@ -174,13 +191,15 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     )
     dim = spark.read.format("delta").load(dim_path)
 
-    # fact_deliveries
+    # fact_deliveries: Silver only reads Bronze (never RAW), for the processed range.
     deliveries = (
         spark.read.format("delta")
         .load(table_path(cfg, "bronze", bronze.TABLE))
         .filter(F.col("fecha_proceso").between(start, end))
     )
+    # Exact duplicates (all source columns equal) keep a single copy; not an anomaly (5.6).
     deduplicated = deliveries.dropDuplicates(list(bronze.SOURCE_COLUMNS))
+    # Out-of-scope delivery types (COBR, Z99) are discarded: counted, never persisted.
     valid_types = [*cfg.business.routine_delivery_types, *cfg.business.bonus_delivery_types]
     in_scope = deduplicated.filter(F.trim("tipo_entrega").isin(*valid_types))
 
@@ -188,6 +207,7 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     fact = build_fact(in_scope, dim, cfg).withColumn("_batch_id", F.lit(batch_id)).cache()
     valid, quarantine = split_anomalies(fact)
 
+    # Valid rows: MERGE on the business key, scoped to the processed range.
     merge_into(
         spark,
         valid,
@@ -196,8 +216,10 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
         partition_by="fecha_proceso",
         scope=date_range_predicate(start, end, alias="t"),
     )
+    # Quarantined rows: replaced for the same range, so reprocessing never duplicates them.
     overwrite_date_range(quarantine, quarantine_path(cfg, "silver", FACT_TABLE), start, end)
 
+    # Reconciliation counts: read = duplicates + discarded + quarantined + written.
     read, unique, kept = deliveries.count(), deduplicated.count(), in_scope.count()
     metrics = {
         "read": read,

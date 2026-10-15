@@ -6,10 +6,13 @@ from pyspark.sql import SparkSession
 
 
 def get_spark(app_name: str = "saas-pipeline") -> SparkSession:
+    # On Databricks (or inside tests) a session already exists and must be reused.
     spark = SparkSession.getActiveSession()
     if spark is None:
+        # Imported lazily: only the local run needs delta-spark to fetch the Delta jars.
         from delta import configure_spark_with_delta_pip
 
+        # Local session with the Delta extensions (MERGE, replaceWhere, time travel).
         builder = (
             SparkSession.builder.appName(app_name)
             .master("local[*]")

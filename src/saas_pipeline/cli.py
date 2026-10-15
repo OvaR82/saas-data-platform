@@ -17,6 +17,7 @@ from saas_pipeline.pipeline import LAYER_ORDER, run
 
 
 def _parse_layers(value: str) -> list[str]:
+    """'bronze,silver' -> ['bronze', 'silver']; unknown layer names are rejected by argparse."""
     layers = [layer.strip() for layer in value.split(",") if layer.strip()]
     unknown = set(layers) - set(LAYER_ORDER)
     if unknown:
@@ -28,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="saas-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # `run`: the explicit flags required by the test plus free-form config overrides.
     run_cmd = sub.add_parser("run", help="Run the pipeline")
     run_cmd.add_argument("--env", choices=ENVIRONMENTS, default="dev")
     run_cmd.add_argument(
@@ -42,11 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
         "overrides", nargs="*", help="Config overrides, e.g. execution.fail_fast=true"
     )
 
+    # `validate-config`: used by CI to prove that every YAML combination loads.
     sub.add_parser("validate-config", help="Load every env x tenant combination")
     return parser
 
 
 def validate_all() -> int:
+    """Load every (env, tenant) pair; any invalid file raises and returns a non-zero exit code."""
     for env in ENVIRONMENTS:
         for tenant in available_tenants():
             load_config(env, tenant)
@@ -62,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate-config":
         return validate_all()
 
+    # --start-date/--end-date are sugar for config overrides, so they follow the same precedence.
     overrides = list(args.overrides)
     if args.start_date:
         overrides.append(f"execution.start_date={args.start_date}")

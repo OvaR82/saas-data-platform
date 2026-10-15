@@ -5,10 +5,12 @@ from __future__ import annotations
 from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
 
+# Every date-ranged table is filtered and partitioned by the source process date (yyyymmdd).
 PARTITION_COLUMN = "fecha_proceso"
 
 
 def date_range_predicate(start: str, end: str, alias: str | None = None) -> str:
+    """SQL predicate for the processed range; `alias` qualifies the column inside a MERGE."""
     column = f"{alias}.{PARTITION_COLUMN}" if alias else PARTITION_COLUMN
     return f"{column} BETWEEN '{start}' AND '{end}'"
 
@@ -26,6 +28,7 @@ def overwrite_date_range(
         .mode("overwrite")
         .option("replaceWhere", date_range_predicate(start, end))
     )
+    # Small tables (Gold) stay unpartitioned: replaceWhere also works on plain data columns.
     if partitioned:
         writer = writer.partitionBy(PARTITION_COLUMN)
     writer.save(path)
@@ -51,6 +54,7 @@ def merge_into(
     (e.g. a row that moved to quarantine after a fix in the rules). Without `scope` nothing is
     ever deleted, which is what a history table such as an SCD2 dimension needs.
     """
+    # First run: there is nothing to merge into, so the table is simply created.
     if not DeltaTable.isDeltaTable(spark, path):
         writer = df.write.format("delta")
         if partition_by:
@@ -58,9 +62,11 @@ def merge_into(
         writer.save(path)
         return
 
+    # Match on the business key; adding the scope lets Delta prune the untouched partitions.
     condition = " AND ".join(f"t.{key} = s.{key}" for key in keys)
     if scope:
         condition = f"{condition} AND {scope}"
+    # Existing keys are updated, new keys are inserted.
     merge = (
         DeltaTable.forPath(spark, path)
         .alias("t")
@@ -68,6 +74,7 @@ def merge_into(
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
     )
+    # Keys that disappeared from the source inside the scope are removed (exact reprocessing).
     if scope:
         merge = merge.whenNotMatchedBySourceDelete(condition=scope)
     merge.execute()
