@@ -1,61 +1,284 @@
 # saas-data-platform
 
-Pipeline Medallion multi-tenant (RAW → Bronze → Silver → Gold) sobre PySpark + Delta Lake,
-siguiendo la arquitectura provista del proyecto SAAS.
+Pipeline Medallion multi-tenant (RAW → Bronze → Silver → Gold) sobre **PySpark + Delta Lake**,
+implementado sobre la arquitectura provista del proyecto SAAS: configuración jerárquica por
+ambiente y tenant, SCD Type 2 con join temporal, cuarentena de anomalías, checks de calidad
+persistidos e idempotencia en todas las capas.
 
-> Documento en construcción: las secciones completas (estructura, onboarding de tenants,
-> decisiones de alcance) se agregan a medida que avanza la implementación.
+| Documento | Contenido |
+|---|---|
+| [docs/observations.md](docs/observations.md) | Ambigüedades resueltas, desacuerdos con la arquitectura y mejoras propuestas |
+| [docs/infra.md](docs/infra.md) | Qué provisionaría Terraform por tenant, con snippet del módulo |
+| [docs/onboarding-tenant.md](docs/onboarding-tenant.md) | Alta de un tenant nuevo paso a paso |
+| [mentoring/code_review.md](mentoring/code_review.md) | Revisión de `bad_code.py`, refactor y nota al junior |
+| [notebooks/demo.ipynb](notebooks/demo.ipynb) | Notebook de demo con los resultados del pipeline |
 
-## Versiones
+## Resultado sobre el dataset de la prueba
+
+Corrida completa de los 6 tenants (`make run`), semestre 2025-01-01 a 2025-06-30:
+
+| Etapa | Filas | Detalle |
+|---|---|---|
+| CSV de entrada | 3 115 | 6 tenants: SV, HN, EC, JM, GT, PE |
+| Bronze | 3 075 | Las 40 restantes van a `bronze_quarantine` (fecha nula o inválida) |
+| Silver: duplicados exactos | 15 | Se conserva una copia |
+| Silver: descartadas | 188 | `tipo_entrega` COBR o Z99: se cuentan, no se guardan |
+| Silver: cuarentena | 75 | Cantidad ≤ 0 o nula, material fuera de catálogo |
+| Silver: `fact_deliveries` | 2 797 | 15 + 188 + 75 + 2 797 = 3 075: ninguna fila se pierde |
+| Gold | 688 | Una fila por tenant, día y tipo de entrega |
+
+Todos los checks críticos pasan. Dos ejecuciones seguidas dejan exactamente los mismos conteos.
+
+## Requisitos y versiones
 
 | Componente | Versión |
 |---|---|
-| Python | 3.11 |
+| Python | 3.11 (3.11.10) |
 | PySpark | 3.5.3 |
 | delta-spark | 3.2.1 |
 | OmegaConf | 2.3.0 |
-| Java (requerido por Spark) | 17 |
+| Java (requerido por Spark) | OpenJDK 17 |
+| uv (gestor de entorno) | 0.5.4 |
+| ruff / pytest | 0.7.4 / 8.3.3 |
 
-## Entorno (Linux / WSL2)
+Las versiones son compatibles con Databricks Runtime 15.x LTS (Spark 3.5, Delta 3). Todo el árbol
+de dependencias está fijado en `uv.lock`.
+
+## Puesta en marcha
+
+Linux, o Windows con **WSL2 (Ubuntu 24.04)**:
 
 ```bash
 sudo apt install -y openjdk-17-jdk make
-curl -LsSf https://astral.sh/uv/install.sh | sh
-make setup
+curl -LsSf https://astral.sh/uv/0.5.4/install.sh | sh
+git clone https://github.com/OvaR82/saas-data-platform.git
+cd saas-data-platform
+make setup          # crea el entorno con las versiones de uv.lock e instala los hooks de git
 ```
 
-### Windows con WSL2
+La primera ejecución de Spark descarga los jars de Delta desde Maven (requiere internet una vez).
 
-En Windows se usa WSL2 (Ubuntu 24.04). El código puede vivir en el disco de Windows
-(`/mnt/<unidad>/...`) y editarse desde Windows, pero conviene que **el entorno virtual y los
-datos generados** queden en el filesystem de Linux: Delta hace muchas escrituras pequeñas y
-`/mnt/<unidad>` es bastante más lento (medido: ~114 s frente a ~56 s por tenant).
+### Recomendado en WSL2
 
-Agregar a `~/.bashrc`:
+Si el código vive en el disco de Windows (`/mnt/<unidad>/...`), conviene que el entorno virtual y
+los datos generados queden en el disco de Linux: Delta hace muchas escrituras pequeñas y
+`/mnt/<unidad>` es bastante más lento (medido: ~114 s frente a ~56 s por tenant). En `~/.bashrc`:
 
 ```bash
 export UV_PROJECT_ENVIRONMENT=$HOME/.venvs/saas-data-platform
 export SAAS_DATA_ROOT=$HOME/saas-data
 ```
 
-## Dónde se escriben los datos
+## Ejecutar el pipeline
+
+```bash
+make run                                        # todos los tenants, todas las capas, semestre completo
+make run TENANT=sv START=2025-03-01 END=2025-03-31
+make run ENV=qa TENANT=hn LAYERS=bronze,silver
+```
+
+El Makefile llama a la CLI, que también se puede usar directamente:
+
+```bash
+uv run saas-pipeline run --env dev --tenant sv --start-date 2025-03-01 --end-date 2025-03-31
+uv run saas-pipeline run --tenant all execution.fail_fast=true quality.fail_on_critical=true
+uv run saas-pipeline validate-config
+```
+
+| Argumento | Descripción |
+|---|---|
+| `--env` | `dev`, `qa` o `main` |
+| `--tenant` | Código en minúscula (`sv`) o `all`. Por defecto, `execution.tenant` |
+| `--start-date`, `--end-date` | Rango de `fecha_proceso` a procesar (`YYYY-MM-DD`) |
+| `--layers` | Subconjunto de `bronze,silver,gold` |
+| `clave=valor` | Cualquier parámetro de configuración, con la máxima precedencia |
+
+Con `--tenant all`, si un tenant falla los demás continúan (salvo `execution.fail_fast=true`); al
+final se listan los fallidos y el proceso termina con código distinto de cero.
+
+## Pruebas y linter
+
+```bash
+make lint             # ruff check + ruff format --check (PEP8, imports, bugs comunes)
+make test             # pytest: 29 pruebas, con Spark real
+make validate-config  # carga todas las combinaciones de ambiente y tenant
+make format           # corrige el formato automáticamente
+```
+
+Las pruebas cubren: configuración y precedencia, validación de fechas, idempotencia de Bronze y
+reproceso por rango, conversión de unidades, flags, join temporal SCD2, cuarentena con todos sus
+motivos, métricas Gold, checks de calidad y su persistencia, la puerta `fail_on_critical`, una
+corrida completa repetida y el refactor de mentoría.
+
+El mismo conjunto corre en GitHub Actions en cada push y pull request
+([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
+## Notebook de demo
+
+```bash
+make notebook
+```
+
+Abre Jupyter (en el mismo entorno del proyecto) en `notebooks/`; la URL que imprime se abre en el
+navegador. `demo.ipynb` ejecuta el pipeline para un tenant y muestra los checks de calidad, Gold, la
+cuarentena por motivo, la evidencia del join temporal, el historial de Delta (idempotencia), el
+reproceso de un mes y vistas SQL para consultas libres.
+
+## Arquitectura implementada
+
+```mermaid
+flowchart TD
+    RAW["RAW<br/>data/raw/*.csv"] -->|"overwrite del rango<br/>(replaceWhere)"| BRONZE["BRONZE<br/>{tenant}/deliveries<br/>strings + columnas técnicas"]
+    RAW -.->|"fecha nula o inválida"| BQ["bronze_quarantine"]
+    CAT["materials_catalog.csv"] -->|"MERGE (material, valid_from)"| DIM["SILVER<br/>{tenant}/dim_materials<br/>SCD Type 2"]
+    BRONZE -->|"dedupe · descarte · tipos · CS→ST · flags"| JOIN{{"join temporal<br/>fecha BETWEEN valid_from AND valid_to"}}
+    DIM --> JOIN
+    JOIN -->|"MERGE por clave de negocio<br/>acotado al rango"| FACT["SILVER<br/>{tenant}/fact_deliveries"]
+    JOIN -.->|"anomalías con motivo"| SQ["silver_quarantine"]
+    FACT --> CHECKS{{"checks de calidad<br/>critical · warning · info"}}
+    CHECKS -->|"se registran siempre"| QL["shared/quality_logs"]
+    CHECKS -->|"si no hay críticos fallidos<br/>(o fail_on_critical=false)"| GOLD["GOLD<br/>{tenant}/daily_metrics_by_delivery_type<br/>recálculo del rango"]
+```
+
+| Capa | Tabla | Escritura | Partición |
+|---|---|---|---|
+| Bronze | `deliveries` | Overwrite del rango de fechas (`replaceWhere`) | `fecha_proceso` |
+| Silver | `fact_deliveries` | `MERGE` por `(tenant_id, fecha_proceso, transporte, ruta, material, tipo_entrega)` | `fecha_proceso` |
+| Silver | `dim_materials` | `MERGE` SCD2 por `(material, valid_from)`; la historia nunca se borra | — |
+| Gold | `daily_metrics_by_delivery_type` | Recálculo del rango (`replaceWhere`) | — (ver D1) |
+| Compartida | `quality_logs` | Append (una fila por check y corrida) | — |
+
+Puntos clave:
+
+- **Aislamiento multi-tenant** por ruta (`<layer>/<tenant>/<table>`), equivalente a un schema por
+  tenant en Unity Catalog (`saas_<env>.<layer>_<tenant>.<table>`).
+- **Join temporal**: cada entrega toma la versión del material vigente en su `fecha_proceso`, no la
+  actual. Un material sin versión vigente va a cuarentena, no se pierde en el join.
+- **Cuarentena con todos los motivos** de una fila (`non_positive_cantidad;material_not_in_catalog`).
+- **Reproceso exacto**: el MERGE de Silver borra las filas del rango que ya no vienen en el origen
+  (por ejemplo, porque pasaron a cuarentena).
+- **Montos con `decimal(38,18)`**, nunca `float`.
+
+El detalle de cada decisión y sus alternativas está en [docs/observations.md](docs/observations.md).
+
+## Configuración
+
+Jerarquía con OmegaConf; cada nivel sobrescribe al anterior:
+
+```
+config/base.yaml              defaults compartidos
+config/env/<env>.yaml         dev | qa | main (cambian las rutas; main activa fail_on_critical)
+config/tenants/<tenant>.yaml  un archivo por tenant
+CLI                           --start-date, --end-date y overrides clave=valor
+```
+
+| Parámetro | Default | Descripción |
+|---|---|---|
+| `paths.data_root` | `${oc.env:SAAS_DATA_ROOT,data}` | Base de las capas generadas |
+| `paths.bronze`, `silver`, `gold` | `<root>/<layer>` | Rutas base por capa |
+| `paths.quarantine_root` | `<root>` | Base de `<layer>_quarantine/<tenant>/<table>` |
+| `paths.quality_logs` | `<root>/shared/quality_logs` | Tabla Delta de logs de calidad |
+| `execution.start_date`, `end_date` | `2025-01-01`, `2025-06-30` | Rango de `fecha_proceso` |
+| `execution.tenant` | `all` | Tenant por defecto de la CLI |
+| `execution.fail_fast` | `false` | Abortar `--tenant all` ante el primer fallo |
+| `quality.fail_on_critical` | `false` (`true` en `main`) | Detener el tenant antes de Gold si falla un check crítico |
+| `quality.max_quarantine_rate` | `0.05` | Umbral del warning de tasa de cuarentena |
+| `business.units_per_case` | `20` | Factor CS → ST |
+| `business.routine_delivery_types` / `bonus_delivery_types` | `[ZPRE, ZVE1]` / `[Z04, Z05]` | Tipos válidos; el resto se descarta |
+
+`dev` escribe en `<data_root>/...` (la estructura de la arquitectura); `qa` y `main` en
+`<data_root>/qa/...` y `<data_root>/main/...`.
+
+### Dónde se escriben los datos
 
 | Ruta | Contenido |
 |---|---|
-| `data/raw/` | Entradas (CSV). Versionadas en el repo y de solo lectura. |
-| `<data_root>/<layer>/<tenant>/<table>/` | Bronze, Silver y Gold de `dev` |
+| `data/raw/` | Entradas (CSV). Versionadas y de solo lectura |
+| `<data_root>/<layer>/<tenant>/<table>/` | Bronze, Silver y Gold |
 | `<data_root>/<layer>_quarantine/<tenant>/<table>/` | Cuarentena de Bronze y Silver |
-| `<data_root>/shared/quality_logs/` | Logs de calidad (todos los tenants) |
-| `<data_root>/qa/...`, `<data_root>/main/...` | Lo mismo para `qa` y `main` |
+| `<data_root>/shared/quality_logs/` | Logs de calidad de todos los tenants |
 
-`data_root` vale `./data` por defecto (la estructura de la arquitectura) y se mueve con la
-variable de entorno `SAAS_DATA_ROOT` (resuelta por OmegaConf en `config/base.yaml`), sin tocar
-código ni YAML. El CI y cualquier clon nuevo usan el valor por defecto. `make clean` borra solo las
-capas generadas bajo `data_root`, nunca `data/raw`.
+`data_root` vale `./data` por defecto y se mueve con `SAAS_DATA_ROOT`, sin tocar código ni YAML.
+`make clean` borra solo las capas generadas, nunca `data/raw`.
 
-## Uso rápido
+## Calidad de datos
 
-```bash
-make lint && make validate-config && make test
-make run ENV=dev TENANT=sv START=2025-01-01 END=2025-06-30
+| Check | Capa | Severidad | Qué valida |
+|---|---|---|---|
+| `valid_fecha_proceso` | Bronze | warning | Filas enviadas a cuarentena por fecha nula o inválida |
+| `unique_business_key` | Silver | critical | La clave del MERGE es única |
+| `material_version_enriched` | Silver | critical | Toda fila encontró su versión de material en el join temporal |
+| `single_current_version` | Silver | critical | SCD2: exactamente una versión vigente por material |
+| `no_overlapping_versions` | Silver | critical | SCD2: las versiones de un material no se solapan |
+| `row_reconciliation` | Silver | critical | Leídas = duplicados + descartadas + cuarentena + escritas |
+| `quarantine_rate` | Silver | warning | La cuarentena no supera `max_quarantine_rate` |
+| `discarded_delivery_types` | Silver | info | Cuántas filas se descartaron por tipo de entrega |
+
+Cada corrida agrega sus resultados a `quality_logs` con el esquema de la sección 5.9 (`_run_id`,
+`_batch_id`, `tenant_id`, `layer`, `table_name`, `check_name`, `check_severity`,
+`records_checked`, `records_failed`, `check_passed`, `executed_at`).
+
+## Onboarding de un tenant nuevo
+
+1. Crear `config/tenants/<code>.yaml` con `code`, `name` y `enabled: true` (más los overrides que
+   necesite).
+2. `make validate-config`.
+3. `make run TENANT=<code>`; desde ese momento también entra en `--tenant all`.
+
+En producción, el mismo YAML alimenta al módulo de Terraform que crea sus schemas, carpetas, grants
+y secret scope. Detalle en [docs/onboarding-tenant.md](docs/onboarding-tenant.md) y
+[docs/infra.md](docs/infra.md).
+
+## Estructura del repositorio
+
 ```
+saas-data-platform/
+├── .github/workflows/ci.yml    CI: ruff, validación de YAML y pytest
+├── config/                     configuración jerárquica (base, env, tenants)
+├── data/raw/                   CSV de entrada (el resto de data/ se genera y no se versiona)
+├── docs/
+│   ├── observations.md         decisiones sobre la arquitectura (obligatorio)
+│   ├── infra.md                Terraform: qué se provisiona por tenant + snippet
+│   └── onboarding-tenant.md    alta de un tenant paso a paso
+├── mentoring/
+│   ├── bad_code.py             código del Anexo A, sin modificar
+│   ├── good_code.py            refactor
+│   └── code_review.md          revisión y nota al junior
+├── notebooks/demo.ipynb        notebook de la demo
+├── src/saas_pipeline/
+│   ├── cli.py                  entrada de línea de comandos
+│   ├── config.py               carga, validación y rutas
+│   ├── pipeline.py             orquestación por tenant y fail_fast
+│   ├── session.py              SparkSession local o la activa de Databricks
+│   ├── storage.py              escrituras Delta (replaceWhere, MERGE)
+│   ├── bronze.py · silver.py · gold.py
+│   └── quality.py              checks, quality_logs y puerta de calidad
+├── tests/                      pytest
+├── Makefile                    setup, lint, test, run, notebook, clean
+├── pyproject.toml · uv.lock    dependencias fijadas
+└── .pre-commit-config.yaml     ruff antes de cada commit
+```
+
+Cada capa separa las transformaciones puras (`DataFrame -> DataFrame`, probadas con datos en
+memoria) de la función `run()`, la única que lee y escribe.
+
+## Qué dejé fuera y por qué
+
+| Fuera de alcance | Por qué | Dónde se retoma |
+|---|---|---|
+| Segunda tabla Gold | Bonus. Se priorizó que la tabla obligatoria, la calidad y la mentoría quedaran completas y probadas | — |
+| Ingesta con Auto Loader / streaming | Bonus. El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
+| Dashboard | Bonus. El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
+| Terraform funcional (`plan` contra una cuenta real) | Bonus. Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |
+| Ejecución en Databricks | El enunciado pide demostrarlo localmente; el código es compatible (reusa la sesión activa, sin rutas absolutas) | `observations.md` H5 |
+| Framework de calidad (Great Expectations, DLT expectations) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
+| Paralelismo entre tenants | Con este volumen el tiempo es costo fijo de Spark/Delta; en producción, una tarea por tenant | `observations.md` H5 |
+| Pre-commit hooks | **Incluido** (era bonus): bajo costo y evita commits que el CI rechazaría | — |
+
+## Convenciones
+
+- Código, nombres, comentarios y docstrings en inglés; documentación en español.
+- Tablas y columnas en `snake_case`; columnas técnicas con prefijo `_`; flags con prefijo `is_`;
+  códigos de tenant en minúscula.
+- Commits con [Conventional Commits](https://www.conventionalcommits.org/) y cambios a `main`
+  solo por pull request con CI en verde.
