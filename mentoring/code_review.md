@@ -15,7 +15,7 @@ ejecutando la lógica original sobre el dataset real de la prueba.
 - La función es corta y se entiende qué intenta hacer.
 - La salida queda separada por país.
 
-Es una buena base: los problemas están en **cómo** se ejecuta, no en **qué** se calcula.
+Es una buena base: los problemas están en **cómo** se ejecuta, no en **qué** calcula.
 
 ## Resumen
 
