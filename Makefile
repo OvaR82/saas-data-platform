@@ -35,7 +35,7 @@ run:
 		--start-date $(START) --end-date $(END) --layers $(LAYERS)
 
 notebook:  ## Open the demo notebook (Jupyter runs in WSL, open the printed URL in the browser)
-	uv run jupyter lab --no-browser --notebook-dir=notebooks
+	uv run --group demo jupyter lab --no-browser --notebook-dir=notebooks
 
 clean:  ## Remove generated layers under DATA_ROOT (never touches data/raw)
-	rm -rf $(addprefix $(DATA_ROOT)/,bronze silver gold bronze_quarantine silver_quarantine shared qa main)
+	rm -rf $(addprefix $(DATA_ROOT)/,bronze silver gold bronze_quarantine silver_quarantine shared mentoring qa main)
