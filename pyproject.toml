@@ -1,0 +1,42 @@
+[project]
+name = "saas-pipeline"
+version = "0.1.0"
+description = "Multi-tenant Medallion pipeline (Bronze/Silver/Gold) on PySpark + Delta Lake"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pyspark==3.5.3",
+    "delta-spark==3.2.1",
+    "omegaconf==2.3.0",
+]
+
+[project.scripts]
+saas-pipeline = "saas_pipeline.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.3",
+    "ruff==0.7.4",
+    "pre-commit==4.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/saas_pipeline"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["mentoring/bad_code.py"]
+
+[tool.ruff.lint]
+# pycodestyle (PEP8), pyflakes, isort, pep8-naming, bugbear, pyupgrade, simplify
+select = ["E", "W", "F", "I", "N", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
