@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4  # Spark 3.5 runs on the JVM
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.4"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --python 3.11
+
+      - name: Lint (ruff, PEP8)
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Validate YAML configuration
+        run: uv run saas-pipeline validate-config
+
+      - name: Unit tests
+        run: uv run pytest
