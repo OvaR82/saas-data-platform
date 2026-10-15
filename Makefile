@@ -1,9 +1,9 @@
-# Usage: make <target> [ENV=dev] [TENANT=all] [START=2025-01-01] [END=2025-06-30] [LAYERS=bronze]
+# Usage: make <target> [ENV=dev] [TENANT=all] [START=2025-01-01] [END=2025-06-30] [LAYERS=bronze,silver,gold]
 ENV ?= dev
 TENANT ?= all
 START ?= 2025-01-01
 END ?= 2025-06-30
-LAYERS ?= bronze
+LAYERS ?= bronze,silver,gold
 
 .PHONY: help setup lint format test validate-config run clean
 

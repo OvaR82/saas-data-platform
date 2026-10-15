@@ -8,20 +8,54 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
-from saas_pipeline import bronze
-from saas_pipeline.config import DEFAULT_CONFIG_DIR, load_config, resolve_tenants
+from saas_pipeline import bronze, gold, quality, silver
+from saas_pipeline.config import (
+    DEFAULT_CONFIG_DIR,
+    load_config,
+    resolve_tenants,
+    table_path,
+    to_partition_value,
+)
 from saas_pipeline.session import get_spark
 
 log = logging.getLogger(__name__)
 
-LAYER_ORDER = ("bronze",)
+LAYER_ORDER = ("bronze", "silver", "gold")
+
+
+def _silver_checks(
+    spark: SparkSession, cfg: DictConfig, metrics: dict[str, int]
+) -> list[quality.CheckResult]:
+    start = to_partition_value(cfg.execution.start_date)
+    end = to_partition_value(cfg.execution.end_date)
+    fact = (
+        spark.read.format("delta")
+        .load(table_path(cfg, "silver", silver.FACT_TABLE))
+        .filter(F.col("fecha_proceso").between(start, end))
+    )
+    dim = spark.read.format("delta").load(table_path(cfg, "silver", silver.DIM_TABLE))
+    return quality.run_silver_checks(fact, dim, metrics, cfg.quality.max_quarantine_rate)
 
 
 def run_tenant(spark: SparkSession, cfg: DictConfig, layers: list[str], run_id: str) -> None:
-    batch_id = f"{run_id}_{cfg.tenant.code}"
-    if "bronze" in layers:
-        bronze.run(spark, cfg, batch_id)
+    tenant = cfg.tenant.code
+    batch_id = f"{run_id}_{tenant}"
+    checks: list[quality.CheckResult] = []
+    try:
+        if "bronze" in layers:
+            checks.append(quality.check_bronze_process_date(bronze.run(spark, cfg, batch_id)))
+        if "silver" in layers:
+            checks += _silver_checks(spark, cfg, silver.run(spark, cfg, batch_id))
+    finally:
+        # Persist whatever was checked, even if a later step failed.
+        quality.write_quality_logs(spark, checks, cfg.paths.quality_logs, run_id, batch_id, tenant)
+
+    # Raises CriticalQualityError (tenant fails, Gold is skipped) if configured to.
+    quality.enforce(checks, tenant, cfg.quality.fail_on_critical)
+    if "gold" in layers:
+        gold.run(spark, cfg, batch_id)
 
 
 def run(

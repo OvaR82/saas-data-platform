@@ -35,5 +35,5 @@ export UV_PROJECT_ENVIRONMENT=$HOME/.venvs/saas-data-platform
 
 ```bash
 make lint && make validate-config && make test
-make run ENV=dev TENANT=sv START=2025-01-01 END=2025-06-30 LAYERS=bronze
+make run ENV=dev TENANT=sv START=2025-01-01 END=2025-06-30
 ```
