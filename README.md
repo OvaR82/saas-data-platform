@@ -42,7 +42,8 @@ Todos los checks críticos pasan. Dos ejecuciones seguidas dejan exactamente los
 | ruff / pytest | 0.7.4 / 8.3.3 |
 
 Las versiones son compatibles con Databricks Runtime 15.x LTS (Spark 3.5, Delta 3). Todo el árbol
-de dependencias está fijado en `uv.lock`.
+de dependencias está fijado en `uv.lock`. Python queda fijado en 3.11 (`>=3.11,<3.12`) porque
+PySpark 3.5 no soporta oficialmente 3.12.
 
 ## Puesta en marcha
 
@@ -277,7 +278,8 @@ memoria) de la función `run()`, la única que lee y escribe.
 
 ## Convenciones
 
-- Código, nombres, comentarios y docstrings en inglés; documentación en español.
+- Código, nombres, comentarios y docstrings en inglés (los comentarios forman parte del código);
+  documentación en español, que es el idioma del equipo evaluador. Cada categoría es consistente.
 - Tablas y columnas en `snake_case`; columnas técnicas con prefijo `_`; flags con prefijo `is_`;
   códigos de tenant en minúscula.
 - Commits con [Conventional Commits](https://www.conventionalcommits.org/) y cambios a `main`
