@@ -9,7 +9,7 @@ sin dejarla registrada aquí.
 |---|---|---|
 | Ambigüedades resueltas | A1–A11 | Huecos del enunciado y cómo se resolvieron en el código |
 | Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
-| Mejoras (Horizonte 2-3) | H1–H6 | Evolución tecnológica propuesta |
+| Mejoras (Horizonte 2-3) | H1–H7 | Evolución tecnológica propuesta |
 
 Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver), **D3**
 (aislamiento por schema frente a catálogo) y **D5** (la clave de negocio no identifica una entrega).
@@ -150,3 +150,26 @@ comentarios de tabla y columna en Unity Catalog (son el contexto que lee el agen
 o una capa semántica con las definiciones oficiales (qué es "revenue", qué es "entrega de rutina"),
 vistas cross-tenant con *row filters* para que cada agente solo vea los tenants permitidos, y
 acceso a través de herramientas gobernadas (Genie, funciones de UC) en lugar de SQL libre.
+
+### H7. MongoDB como fuente operacional y Couchbase como capa de servicio
+El stack de la arquitectura incluye MongoDB y Couchbase como "fuentes operacionales / serving",
+pero la prueba trabaja con un CSV. Cómo encajarían sin cambiar el diseño por capas:
+
+- **MongoDB → Bronze.** Lectura con el conector oficial de MongoDB para Spark: una carga inicial
+  en batch y después *change streams* para traer solo los documentos nuevos o modificados (CDC),
+  con el checkpoint en el almacenamiento del tenant. Las credenciales salen del secret scope del
+  tenant (ver `infra.md`), nunca del código. Bronze guarda el documento como llega (JSON en una
+  columna, más las columnas técnicas), igual que hoy guarda el CSV como strings: un campo nuevo en
+  la fuente no rompe la ingesta, y el aplanado y tipado siguen siendo responsabilidad de Silver.
+- **Gold → Couchbase.** Couchbase sirve lecturas de baja latencia a aplicaciones (por ejemplo, el
+  top de materiales de un tenant en una app comercial). Se alimentaría con un paso de publicación
+  *después* de Gold y solo con tablas Gold: un documento por clave de negocio (por ejemplo,
+  `tenant::mes::material`), con *upsert* para que publicar dos veces dé el mismo resultado.
+  Couchbase es una copia derivada: si se pierde, se reconstruye desde Gold.
+- **Por qué así:** el pipeline sigue siendo la única fuente de verdad (Silver/Gold en Delta y Unity
+  Catalog); las bases operacionales quedan en los bordes (entrada y salida) y no se mezclan con el
+  procesamiento analítico.
+- **Trade-offs:** el CDC desde MongoDB exige manejar borrados y reordenamientos de eventos (la
+  clave de negocio y `_ingestion_timestamp` lo resuelven en el MERGE de Silver). Publicar a
+  Couchbase agrega un sistema más que monitorear; si la latencia que piden las apps lo permite,
+  una tabla Gold servida por un SQL warehouse evita esa copia.
