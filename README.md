@@ -43,8 +43,10 @@ Todos los checks críticos pasan. Dos ejecuciones seguidas dejan exactamente los
 | ruff / pytest | 0.7.4 / 8.3.3 |
 
 Las versiones son compatibles con Databricks Runtime 15.x LTS (Spark 3.5, Delta 3). Todo el árbol
-de dependencias está fijado en `uv.lock`. Python queda fijado en 3.11 (`>=3.11,<3.12`) porque
-PySpark 3.5 no soporta oficialmente 3.12.
+de dependencias está fijado en `uv.lock`. El entorno local y el CI usan Python 3.11
+(`.python-version`) porque PySpark 3.5 no soporta oficialmente 3.12; el paquete en sí acepta
+Python ≥ 3.11. PySpark y delta-spark no son dependencias del paquete sino del grupo `spark`,
+que `uv` instala por defecto: en Databricks los aporta el runtime (ver "Ejecutar en Databricks").
 
 ## Puesta en marcha
 
@@ -125,6 +127,56 @@ Abre Jupyter (en el mismo entorno del proyecto) en `notebooks/`; la URL que impr
 navegador. `demo.ipynb` ejecuta el pipeline para un tenant y muestra los checks de calidad, Gold, la
 cuarentena por motivo, la evidencia del join temporal, el historial de Delta (idempotencia), el
 reproceso de un mes y vistas SQL para consultas libres.
+
+## Ejecutar en Databricks
+
+La prueba se demuestra en local, pero el código está preparado para Databricks sin cambios:
+
+| Qué | Cómo se resolvió |
+|---|---|
+| Sesión de Spark | `get_spark()` reutiliza la sesión activa del cluster; no crea una local ni descarga jars |
+| PySpark y Delta | No son dependencias del paquete (los aporta el runtime); instalarlo no pisa el Spark del cluster |
+| Modo ANSI (activado por defecto en serverless) | Fechas, casts y divisiones usan `try_to_timestamp`, `try_cast` y `try_divide`; los tests corren con ANSI activado |
+| Rutas | Ninguna fija en el código: configuración (`config_dir`) y datos (`paths.*`) se pasan por parámetro |
+
+**Ejemplo en un notebook**, con el repo clonado como *Git folder* del workspace:
+
+```python
+%pip install /Workspace/Users/<usuario>/saas-data-platform
+```
+```python
+from pathlib import Path
+from saas_pipeline.pipeline import LAYER_ORDER, run
+
+REPO = Path("/Workspace/Users/<usuario>/saas-data-platform")
+run(
+    env="qa",
+    tenant_selection="all",
+    layers=list(LAYER_ORDER),
+    overrides=[
+        "paths.raw=/Volumes/<catalogo>/<schema>/<volumen>/raw",
+        "paths.root=abfss://<contenedor>@<cuenta>.dfs.core.windows.net/saas/qa",
+    ],
+    config_dir=REPO / "config",
+)
+```
+
+Como **job**, el paquete se instala como wheel (`uv build`) y se ejecuta la entrada
+`saas-pipeline` con los mismos argumentos que en local, más `SAAS_CONFIG_DIR` apuntando a los YAML.
+
+Limitaciones a tener en cuenta:
+
+- **No se ejecutó en un workspace real**: la compatibilidad está diseñada y probada en local (con
+  ANSI activado), no validada en Databricks.
+- **Tablas por ruta, no por nombre**: como pide la sección 5.2 del enunciado, las tablas se leen y
+  escriben por ruta. En Databricks eso requiere una *external location* de Unity Catalog con
+  permisos sobre la ruta de ADLS. En workspaces solo con Unity Catalog y sin external locations
+  (por ejemplo, la Free Edition), lo recomendado es usar tablas por nombre
+  (`saas_<env>.<layer>_<tenant>.<tabla>`): es el paso de migración que describe la arquitectura
+  y está propuesto en `observations.md` (H5 y H8).
+- **Configuraciones de Spark en serverless**: `get_spark()` fija la zona horaria (UTC) y la
+  política de parseo de fechas. Serverless solo permite cambiar algunas configuraciones; conviene
+  confirmar que esas dos están permitidas en el workspace de destino.
 
 ## Arquitectura implementada
 
@@ -302,7 +354,7 @@ y por valor para la entrega.
 | Ingesta con Auto Loader / streaming (bonus) | El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
 | Dashboard (bonus) | El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
 | Terraform funcional, `plan` contra una cuenta real (bonus) | Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |
-| Ejecución en Databricks | El enunciado pide demostrarlo localmente; el código es compatible (reusa la sesión activa, sin rutas absolutas) | `observations.md` H5 y H8 |
+| Ejecución en un workspace de Databricks | El enunciado pide demostrarlo localmente; el código está preparado (ver "Ejecutar en Databricks") pero no se validó en un workspace real | `observations.md` H5 y H8 |
 | Framework de calidad (Great Expectations, expectations de pipelines declarativos) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
 | Paralelismo entre tenants | Con este volumen el tiempo es costo fijo de Spark/Delta; en producción, una tarea por tenant | `observations.md` H5 |
 | MongoDB / Couchbase | Están en el stack como "provisto en arquitectura"; la prueba trabaja con CSV | `observations.md` H7 |
