@@ -1,9 +1,11 @@
-# Usage: make <target> [ENV=dev] [TENANT=all] [START=2025-01-01] [END=2025-06-30] [LAYERS=bronze]
+# Usage: make <target> [ENV=dev] [TENANT=all] [START=2025-01-01] [END=2025-06-30] [LAYERS=bronze,silver,gold]
 ENV ?= dev
 TENANT ?= all
 START ?= 2025-01-01
 END ?= 2025-06-30
-LAYERS ?= bronze
+LAYERS ?= bronze,silver,gold
+# Same default as config/base.yaml (paths.data_root)
+DATA_ROOT ?= $(or $(SAAS_DATA_ROOT),data)
 
 .PHONY: help setup lint format test validate-config run clean
 
@@ -32,5 +34,5 @@ run:
 	uv run saas-pipeline run --env $(ENV) --tenant $(TENANT) \
 		--start-date $(START) --end-date $(END) --layers $(LAYERS)
 
-clean:  ## Remove generated layers (keeps data/raw)
-	rm -rf data/bronze data/silver data/gold data/*_quarantine data/shared data/qa data/main
+clean:  ## Remove generated layers under DATA_ROOT (never touches data/raw)
+	rm -rf $(addprefix $(DATA_ROOT)/,bronze silver gold bronze_quarantine silver_quarantine shared qa main)
