@@ -7,6 +7,7 @@ Precedence (low -> high): config/base.yaml -> config/env/<env>.yaml
 from __future__ import annotations
 
 import os
+import re
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from saas_pipeline.storage import TableRef
 ENVIRONMENTS = ("dev", "qa", "main")
 # path: Delta tables by path (layout of architecture 5.2); catalog: Unity Catalog table names.
 STORAGE_MODES = ("path", "catalog")
+# execution.start_date / end_date format (architecture 5.8).
+ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # Overridable so the package can run from another working directory (e.g. a Databricks job).
 DEFAULT_CONFIG_DIR = Path(os.environ.get("SAAS_CONFIG_DIR", "config"))
 
@@ -84,12 +87,17 @@ def _validate(cfg: DictConfig, tenant: str) -> None:
     # Tenant codes are lowercase everywhere (paths, schemas, _tenant_id), per naming rule 5.3.
     if cfg.tenant.code != tenant or cfg.tenant.code != cfg.tenant.code.lower():
         raise ConfigError(f"tenant.code must be lowercase and match the file name '{tenant}'")
-    # The date range must be parseable and ordered before it is used to filter partitions.
+    # The date range must be strictly YYYY-MM-DD (5.8), real and ordered. str() because OmegaConf
+    # turns an override like 20250301 into an int; fromisoformat alone would also accept other
+    # ISO forms (20250301, 2025-W10-1) on Python 3.11.
+    start_text, end_text = str(cfg.execution.start_date), str(cfg.execution.end_date)
+    for value in (start_text, end_text):
+        if not ISO_DATE.fullmatch(value):
+            raise ConfigError(f"Dates must use YYYY-MM-DD (e.g. 2025-03-01), got '{value}'")
     try:
-        start = date.fromisoformat(cfg.execution.start_date)
-        end = date.fromisoformat(cfg.execution.end_date)
+        start, end = date.fromisoformat(start_text), date.fromisoformat(end_text)
     except ValueError as exc:
-        raise ConfigError(f"Dates must use YYYY-MM-DD: {exc}") from exc
+        raise ConfigError(f"Invalid date: {exc}") from exc
     if start > end:
         raise ConfigError(f"start_date {start} is after end_date {end}")
     # Tables are addressed either by path (this test) or by Unity Catalog name (Databricks).

@@ -12,7 +12,7 @@ import argparse
 import logging
 import sys
 
-from saas_pipeline.config import ENVIRONMENTS, available_tenants, load_config
+from saas_pipeline.config import ENVIRONMENTS, ConfigError, available_tenants, load_config
 from saas_pipeline.pipeline import LAYER_ORDER, run
 
 
@@ -65,9 +65,18 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     args = build_parser().parse_args(argv)
-    if args.command == "validate-config":
-        return validate_all()
+    try:
+        if args.command == "validate-config":
+            return validate_all()
+        return _run_command(args)
+    except ConfigError as exc:
+        # A configuration mistake is a user error: a clear message, no traceback, exit code 2.
+        logging.getLogger("saas_pipeline").error("Invalid configuration: %s", exc)
+        return 2
 
+
+def _run_command(args: argparse.Namespace) -> int:
+    """Translate the `run` arguments into config overrides and run the pipeline."""
     # --start-date/--end-date are sugar for config overrides, so they follow the same precedence.
     overrides = list(args.overrides)
     if args.start_date:
