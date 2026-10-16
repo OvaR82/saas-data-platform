@@ -27,7 +27,7 @@ from pyspark.sql import functions as F
 from saas_pipeline.bronze import is_valid_process_date
 from saas_pipeline.config import ENVIRONMENTS, load_config, to_partition_value
 from saas_pipeline.session import get_spark
-from saas_pipeline.silver import normalize_units
+from saas_pipeline.silver import normalize_code, normalize_units
 from saas_pipeline.storage import overwrite_date_range
 
 log = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def routine_deliveries(
     # Tenant codes are lowercase by convention; normalize the source instead of trusting it.
     rows = df.withColumn("tenant_id", F.lower(F.trim("pais"))).filter(F.col("tenant_id") == tenant)
     # Routine deliveries only; exact duplicates are kept once.
-    routine = rows.filter(F.col("tipo_entrega").isin(*routine_types)).dropDuplicates()
+    routine = rows.filter(normalize_code("tipo_entrega").isin(*routine_types)).dropDuplicates()
     # Shared, tested rule: CS -> ST, any other unit becomes null.
     with_units = normalize_units(routine, units_per_case)
 

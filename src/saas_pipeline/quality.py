@@ -88,19 +88,34 @@ def check_single_current_version(dim: DataFrame) -> CheckResult:
     )
 
 
+def _with_previous_end(dim: DataFrame) -> DataFrame:
+    """Add _previous_end: valid_to of the previous version of the same material (null for the
+    first one). Spark does not allow window functions directly inside a filter."""
+    previous_end = F.lag("valid_to").over(Window.partitionBy("material").orderBy("valid_from"))
+    return dim.withColumn("_previous_end", previous_end)
+
+
 def check_no_overlapping_versions(dim: DataFrame) -> CheckResult:
     """Count versions that overlap the previous one of the same material (critical).
 
     Overlapping versions would make the temporal join duplicate fact rows.
     """
-    # Compare each version with the previous one of the same SKU: it must start after the
-    # previous one ends. (Spark does not allow window functions directly inside a filter.)
-    previous_end = F.lag("valid_to").over(Window.partitionBy("material").orderBy("valid_from"))
-    with_previous = dim.withColumn("_previous_end", previous_end)
-    failed = with_previous.filter(F.col("_previous_end") >= F.col("valid_from")).count()
+    # Each version must start after the previous one of the same SKU ends.
+    failed = _with_previous_end(dim).filter(F.col("_previous_end") >= F.col("valid_from")).count()
     return _result(
         "silver", "dim_materials", "no_overlapping_versions", CRITICAL, dim.count(), failed
     )
+
+
+def check_no_version_gaps(dim: DataFrame) -> CheckResult:
+    """Count versions that start later than the day after the previous one ends (warning).
+
+    A gap leaves dates without a valid version: deliveries on those dates are quarantined as
+    no_material_version_at_date. It is a catalog problem, not a transaction problem.
+    """
+    starts_late = F.date_add(F.col("_previous_end"), 1) < F.col("valid_from")
+    failed = _with_previous_end(dim).filter(starts_late).count()
+    return _result("silver", "dim_materials", "no_version_gaps", WARNING, dim.count(), failed)
 
 
 def check_reconciliation(metrics: dict[str, int]) -> CheckResult:
@@ -165,6 +180,7 @@ def run_silver_checks(
         check_material_enriched(fact),
         check_single_current_version(dim),
         check_no_overlapping_versions(dim),
+        check_no_version_gaps(dim),
         check_reconciliation(metrics),
         check_quarantine_rate(metrics, max_quarantine_rate),
         check_discarded_delivery_types(metrics),

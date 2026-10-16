@@ -66,6 +66,11 @@ def prepare_dim_materials(catalog: DataFrame) -> DataFrame:
 # --- fact_deliveries -------------------------------------------------------------------------
 
 
+def normalize_code(column: str) -> Column:
+    """Business codes (tipo_entrega, unidad) are compared trimmed and in uppercase."""
+    return F.upper(F.trim(F.col(column)))
+
+
 def _try_cast(column: str, sql_type: str) -> Column:
     """Cast that returns null for unparseable values instead of failing under ANSI mode."""
     return F.expr(f"try_cast({column} AS {sql_type})").alias(column)
@@ -84,11 +89,11 @@ def cast_types(df: DataFrame) -> DataFrame:
         bronze.parse_process_date(F.col("fecha_proceso")).alias("fecha_proceso_date"),
         _try_cast("transporte", "BIGINT"),
         _try_cast("ruta", "BIGINT"),
-        F.trim("tipo_entrega").alias("tipo_entrega"),
+        normalize_code("tipo_entrega").alias("tipo_entrega"),
         F.trim("material").alias("material"),
         _try_cast("precio", "DECIMAL(38,18)"),
         _try_cast("cantidad", "DECIMAL(38,18)"),
-        F.upper(F.trim("unidad")).alias("unidad"),
+        normalize_code("unidad").alias("unidad"),
         # Technical columns carried over from Bronze for lineage.
         "_source_file",
         "_ingestion_timestamp",
@@ -115,7 +120,9 @@ def add_delivery_flags(df: DataFrame, routine: list[str], bonus: list[str]) -> D
 def enrich_with_materials(fact: DataFrame, dim: DataFrame) -> DataFrame:
     """Add the catalog attributes valid on fecha_proceso (temporal join, not is_current).
 
-    Also adds _material_found, used by the quarantine rules and dropped afterwards.
+    Also adds two flags used by the quarantine rules and dropped afterwards:
+    _material_known (the SKU exists in the catalog) and _material_found (a version of it is
+    valid on fecha_proceso). They separate "unknown SKU" from "gap in the catalog".
     """
     # Rename the dim key to avoid an ambiguous `material` column after the join.
     versions = dim.select(
@@ -130,12 +137,16 @@ def enrich_with_materials(fact: DataFrame, dim: DataFrame) -> DataFrame:
     on = (F.col("material") == F.col("_dim_material")) & F.col("fecha_proceso_date").between(
         F.col("valid_from"), F.col("valid_to")
     )
-    # Left join: a row without a matching version is kept (and flagged) so it can be
+    # Every SKU of the catalog, whatever its validity (a few dozen rows: broadcast).
+    known = dim.select(F.col("material").alias("_known_material")).distinct()
+    # Left joins: a row without a matching version is kept (and flagged) so it can be
     # quarantined instead of disappearing silently.
     return (
         fact.join(versions, on, "left")
+        .join(F.broadcast(known), F.col("material") == F.col("_known_material"), "left")
         .withColumn("_material_found", F.col("_dim_material").isNotNull())
-        .drop("_dim_material", "valid_from", "valid_to")
+        .withColumn("_material_known", F.col("_known_material").isNotNull())
+        .drop("_dim_material", "_known_material", "valid_from", "valid_to")
     )
 
 
@@ -155,7 +166,10 @@ def quarantine_rules() -> list[tuple[str, Column]]:
         ("non_positive_cantidad", F.col("cantidad") <= 0),
         ("null_precio", F.col("precio").isNull()),
         ("invalid_unidad", F.col("unidad").isNull() | ~F.col("unidad").isin(*VALID_UNITS)),
-        ("material_not_in_catalog", ~F.col("_material_found")),
+        # The SKU does not exist at all: the transaction (or the catalog load) is wrong.
+        ("material_not_in_catalog", ~F.col("_material_known")),
+        # The SKU exists but no version covers fecha_proceso: a gap in the catalog.
+        ("no_material_version_at_date", F.col("_material_known") & ~F.col("_material_found")),
     ]
 
 
@@ -169,7 +183,9 @@ def split_anomalies(df: DataFrame) -> tuple[DataFrame, DataFrame]:
     reasons = F.array_compact(
         F.array(*[F.when(_flag(rule), F.lit(name)) for name, rule in quarantine_rules()])
     )
-    tagged = df.withColumn("_quarantine_reason", F.concat_ws(";", reasons)).drop("_material_found")
+    tagged = df.withColumn("_quarantine_reason", F.concat_ws(";", reasons)).drop(
+        "_material_found", "_material_known"
+    )
     # An empty reason means the row passed every rule.
     valid = tagged.filter(F.col("_quarantine_reason") == "").drop("_quarantine_reason")
     quarantine = tagged.filter(F.col("_quarantine_reason") != "")
@@ -221,7 +237,7 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     deduplicated = deliveries.dropDuplicates(list(bronze.SOURCE_COLUMNS))
     # Out-of-scope delivery types (COBR, Z99) are discarded: counted, never persisted.
     valid_types = [*cfg.business.routine_delivery_types, *cfg.business.bonus_delivery_types]
-    in_scope = deduplicated.filter(F.trim("tipo_entrega").isin(*valid_types))
+    in_scope = deduplicated.filter(normalize_code("tipo_entrega").isin(*valid_types))
 
     # Cached: the join feeds the MERGE, the quarantine write and the counts.
     fact = build_fact(in_scope, dim, cfg).withColumn("_batch_id", F.lit(batch_id)).cache()

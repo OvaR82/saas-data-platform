@@ -75,12 +75,12 @@ def test_cast_types_turns_garbage_into_nulls_under_ansi(spark):
         "tipo_entrega string, material string, precio string, cantidad string, unidad string, "
         "_source_file string, _ingestion_timestamp timestamp, _batch_id string"
     )
-    rows = [("sv", "20250314", "x12", "", "ZPRE", "AA004003", "abc", "1,5", "cs", "f", None, "b")]
+    rows = [("sv", "20250314", "x12", "", " zpre ", "AA004003", "abc", "1,5", "cs", "f", None, "b")]
     out = silver.cast_types(spark.createDataFrame(rows, columns)).first()
 
     assert (out.transporte, out.ruta, out.precio, out.cantidad) == (None, None, None, None)
     assert out.fecha_proceso_date == date(2025, 3, 14)
-    assert out.unidad == "CS"
+    assert (out.unidad, out.tipo_entrega) == ("CS", "ZPRE")  # codes trimmed and uppercased
 
 
 def test_normalize_units_converts_cases_to_units(spark):
@@ -121,6 +121,7 @@ def test_split_anomalies_quarantines_with_every_reason(spark, dim):
         fact_row(material="XX999999", ruta=6),
         fact_row(material="XX999998", cantidad="0", ruta=7),  # two problems at once
         fact_row(unidad="KG", ruta=8),
+        fact_row(fecha="20231215", ruta=9),  # known SKU, but before its first version
     ]
     # `ruta` identifies each case in the assertions below.
     df = silver.enrich_with_materials(spark.createDataFrame(rows, FACT_COLUMNS), dim)
@@ -136,6 +137,7 @@ def test_split_anomalies_quarantines_with_every_reason(spark, dim):
         6: "material_not_in_catalog",
         7: "non_positive_cantidad;material_not_in_catalog",
         8: "invalid_unidad",
+        9: "no_material_version_at_date",
     }
 
 

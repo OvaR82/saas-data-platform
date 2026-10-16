@@ -28,6 +28,21 @@ def test_scd2_checks_detect_overlaps_and_multiple_current_versions(spark):
     assert (current.records_failed, current.records_checked, current.check_passed) == (1, 2, False)
 
 
+def test_gap_check_detects_dates_without_a_version(spark):
+    """A version that starts later than the day after the previous one ends leaves a gap."""
+    dim = spark.createDataFrame(
+        [
+            ("A", date(2024, 1, 1), date(2024, 12, 31), False),
+            ("A", date(2025, 1, 1), date(9999, 12, 31), True),  # contiguous: no gap
+            ("B", date(2024, 1, 1), date(2024, 12, 31), False),
+            ("B", date(2025, 2, 1), date(9999, 12, 31), True),  # January 2025 uncovered
+        ],
+        DIM_COLUMNS,
+    )
+    gaps = quality.check_no_version_gaps(dim)
+    assert (gaps.records_failed, gaps.check_passed, gaps.severity) == (1, False, "warning")
+
+
 def test_reconciliation_detects_lost_rows():
     """Reconciliation fails when read rows are not fully accounted for."""
     assert quality.check_reconciliation(METRICS).check_passed
