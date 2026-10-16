@@ -1,0 +1,4 @@
+tenant:
+  code: pe
+  name: Peru
+  enabled: true

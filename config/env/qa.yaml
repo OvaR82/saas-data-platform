@@ -1,0 +1,4 @@
+env: qa
+
+paths:
+  root: data/qa

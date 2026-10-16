@@ -1,0 +1,4 @@
+tenant:
+  code: ec
+  name: Ecuador
+  enabled: true

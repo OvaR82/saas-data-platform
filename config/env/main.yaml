@@ -1,0 +1,7 @@
+env: main
+
+paths:
+  root: data/main
+
+quality:
+  fail_on_critical: true  # production must not publish Gold on top of critical failures

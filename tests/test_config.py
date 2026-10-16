@@ -1,0 +1,58 @@
+from pathlib import Path
+
+import pytest
+
+from saas_pipeline.config import (
+    ENVIRONMENTS,
+    ConfigError,
+    available_tenants,
+    load_config,
+    quarantine_path,
+    resolve_tenants,
+    table_path,
+    to_partition_value,
+)
+
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+
+
+@pytest.mark.parametrize("env", ENVIRONMENTS)
+def test_every_env_and_tenant_loads(env):
+    for tenant in available_tenants(CONFIG_DIR):
+        cfg = load_config(env, tenant, config_dir=CONFIG_DIR)
+        assert cfg.tenant.code == tenant
+
+
+def test_paths_change_per_env_and_follow_architecture():
+    dev = load_config("dev", "sv", config_dir=CONFIG_DIR)
+    qa = load_config("qa", "sv", config_dir=CONFIG_DIR)
+    assert table_path(dev, "bronze", "deliveries") == "data/bronze/sv/deliveries"
+    assert table_path(qa, "bronze", "deliveries") == "data/qa/bronze/sv/deliveries"
+    assert quarantine_path(dev, "silver", "fact_deliveries") == (
+        "data/silver_quarantine/sv/fact_deliveries"
+    )
+    assert dev.paths.raw == qa.paths.raw  # RAW input is shared across environments
+
+
+def test_cli_overrides_have_highest_precedence():
+    cfg = load_config(
+        "main",
+        "sv",
+        ["quality.fail_on_critical=false", "execution.start_date=2025-03-01"],
+        config_dir=CONFIG_DIR,
+    )
+    assert cfg.quality.fail_on_critical is False
+    assert cfg.execution.start_date == "2025-03-01"
+
+
+def test_invalid_inputs_are_rejected():
+    with pytest.raises(ConfigError):
+        load_config("prod", "sv", config_dir=CONFIG_DIR)
+    with pytest.raises(ConfigError):
+        resolve_tenants("xx", CONFIG_DIR)
+    with pytest.raises(ConfigError):
+        load_config("dev", "sv", ["execution.start_date=2025-07-01"], config_dir=CONFIG_DIR)
+
+
+def test_partition_value_format():
+    assert to_partition_value("2025-03-14") == "20250314"
