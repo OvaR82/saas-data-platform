@@ -16,7 +16,9 @@ COLUMNS = (
 @pytest.fixture(scope="module")
 def good_code():
     """Import mentoring/good_code.py by path (mentoring/ is not a package)."""
-    spec = importlib.util.spec_from_file_location("good_code", REPO_ROOT / "mentoring/good_code.py")
+    spec = importlib.util.spec_from_file_location(
+        "good_code", REPO_ROOT / "mentoring/good_code.py"
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

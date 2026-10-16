@@ -1,4 +1,4 @@
-"""End-to-end over the real datasets for one tenant: idempotency, quality logs, fail_on_critical."""
+"""End-to-end over the real datasets for one tenant: idempotency, quality logs and the gate."""
 
 from pathlib import Path
 

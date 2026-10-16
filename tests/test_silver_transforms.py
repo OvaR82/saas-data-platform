@@ -75,7 +75,9 @@ def test_cast_types_turns_garbage_into_nulls_under_ansi(spark):
         "tipo_entrega string, material string, precio string, cantidad string, unidad string, "
         "_source_file string, _ingestion_timestamp timestamp, _batch_id string"
     )
-    rows = [("sv", "20250314", "x12", "", " zpre ", "AA004003", "abc", "1,5", "cs", "f", None, "b")]
+    rows = [
+        ("sv", "20250314", "x12", "", " zpre ", "AA004003", "abc", "1,5", "cs", "f", None, "b")
+    ]
     out = silver.cast_types(spark.createDataFrame(rows, columns)).first()
 
     assert (out.transporte, out.ruta, out.precio, out.cantidad) == (None, None, None, None)

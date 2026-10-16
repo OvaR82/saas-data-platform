@@ -17,7 +17,16 @@ FACT_COLUMNS = (
 def fact_row(fecha, material, revenue, categoria="CAT"):
     """Return one Silver fact row with 1 unit at `revenue`, so revenue is easy to reason about."""
     day = date(int(fecha[:4]), int(fecha[4:6]), int(fecha[6:]))
-    return ("sv", fecha, day, material, f"desc {material}", categoria, Decimal(revenue), Decimal(1))
+    return (
+        "sv",
+        fecha,
+        day,
+        material,
+        f"desc {material}",
+        categoria,
+        Decimal(revenue),
+        Decimal(1),
+    )
 
 
 def test_top_materials_ranks_per_month_and_keeps_top_n(spark):

@@ -44,7 +44,7 @@ build-backend = "hatchling.build"
 packages = ["src/saas_pipeline"]
 
 [tool.ruff]
-line-length = 100
+line-length = 99  # PEP8 allows teams to raise the limit up to 99
 target-version = "py311"
 src = ["src", "tests"]
 extend-exclude = ["mentoring/bad_code.py"]
