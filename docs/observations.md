@@ -7,7 +7,7 @@ sin dejarla registrada aquí.
 
 | Tipo | Entradas | Qué contiene |
 |---|---|---|
-| Ambigüedades resueltas | A1–A13 | Huecos del enunciado y cómo se resolvieron en el código |
+| Ambigüedades resueltas | A1–A15 | Huecos del enunciado y cómo se resolvieron en el código |
 | Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
 | Mejoras (Horizonte 2-3) | H1–H8 | Evolución tecnológica propuesta; H8 integra todas en una plataforma objetivo con criterio de costo |
 
@@ -55,7 +55,10 @@ Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver)
 - **Decisión**: el MERGE se acota al rango reprocesado (`t.fecha_proceso BETWEEN start AND end`) y agrega `WHEN NOT MATCHED BY SOURCE ... DELETE` dentro de ese rango. Así el resultado de reprocesar un rango es exactamente el mismo que el de procesarlo por primera vez. `dim_materials` no lleva esa cláusula: su historia nunca se borra.
 
 ### A9. SCD2 cuando la fuente ya trae la historia
-- **Contexto**: el CSV del catálogo ya trae las versiones con `valid_from`/`valid_to`.
+- **Contexto**: el CSV del catálogo ya trae las versiones con `valid_from`/`valid_to`. Como toda
+  fuente, entra por Bronze (`bronze/<tenant>/materials`, snapshot en strings con columnas técnicas,
+  reemplazado en cada corrida) y Silver lo lee de ahí: ninguna capa lee de más atrás que la
+  inmediata anterior (5.1).
 - **Decisión**: MERGE sobre `(material, valid_from)`: versiones nuevas se insertan y las existentes se actualizan (cierre de vigencia o corrección). `is_current` se **recalcula** desde `valid_to = 9999-12-31`; el flag de la fuente no se usa (el enunciado lo define como "no fuente de verdad única").
 - **Salvaguarda**: dos checks críticos validan las invariantes del SCD2 antes de Gold: una sola versión vigente por SKU y versiones sin solapamiento (un solapamiento duplicaría filas en el join temporal).
 - **Límite conocido**: si la fuente enviara solo la versión nueva sin cerrar la anterior, el check de solapamiento lo detecta pero el pipeline no la cierra automáticamente. Ver mejora H1.
@@ -98,6 +101,36 @@ Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver)
   2024-01-01) y las 23 entregas en cuarentena por material son SKUs inexistentes (`XX...`).
 - **Relacionado**: los códigos de negocio `tipo_entrega` y `unidad` se comparan sin espacios y en
   mayúsculas, para que un `zpre` no se descarte como tipo fuera de alcance.
+
+### A14. Dos inconsistencias del enunciado: ubicación de la cuarentena y catálogo de `quality_logs`
+- **Cuarentena**: el diagrama de 5.10 la dibuja dentro de un bloque "SHARED" (`quarantine_<table>`),
+  mientras que 5.2 (`data/<layer>_quarantine/<tenant>/<table>/`) y 5.6
+  (`<layer>_quarantine_<tenant>.<table>`) la definen **por tenant**.
+  **Decisión**: por tenant, como dicen las dos secciones normativas; el diagrama se lee como
+  esquemático. Además es lo coherente con el aislamiento: la cuarentena contiene datos del tenant.
+- **`quality_logs`**: 5.9 la ubica en `<env>.shared.quality_logs`, pero 5.2 nombra los catálogos
+  `saas_<env>`. **Decisión**: `saas_<env>.shared.quality_logs`, en el mismo catálogo que el resto
+  de las tablas del ambiente (`quality_logs_ref` en `config.py`).
+- **Trade-off**: ninguno relevante; se registra para que la interpretación sea explícita.
+
+### A15. Del layout por rutas a los nombres de Unity Catalog
+- **Arquitectura**: 5.2 pide implementar la estructura de rutas y dice que "en una migración a
+  Databricks, los paths se mapean a tablas Unity con los mismos nombres lógicos". La sección 3
+  exige además que el código sea compatible con Databricks.
+- **Problema**: si el código solo sabe leer y escribir por ruta, la "migración" implica reescribir
+  todas las lecturas y escrituras. Y en workspaces solo con Unity Catalog (como la Free Edition)
+  el acceso por ruta no está disponible sin una *external location*.
+- **Decisión**: un parámetro `storage.mode`. Con `path` (por defecto) se implementa exactamente el
+  layout de 5.2. Con `catalog`, las mismas funciones usan `saas_<env>.<layer>_<tenant>.<tabla>`,
+  `saas_<env>.<layer>_quarantine_<tenant>.<tabla>` y `saas_<env>.shared.quality_logs`. Las capas no
+  saben cuál de los dos usan: reciben una referencia de tabla (`TableRef`). El MERGE se ejecuta en
+  SQL (`MERGE INTO`), que acepta ambos tipos de destino.
+- **Verificación**: `tests/test_catalog_mode.py` corre el pipeline completo por nombre de tabla
+  contra el catálogo local de Spark (`spark_catalog`), dos veces, y obtiene los mismos números que
+  por ruta (722 hechos, 35 versiones, 20 en cuarentena, 125 + 30 filas Gold para `sv`). No se
+  ejecutó en un workspace real de Databricks.
+- **Relación con D3**: si se adoptara un catálogo por tenant, solo cambiaría cómo `table_ref`
+  compone el nombre; ninguna capa se toca.
 
 ## Desacuerdos con la arquitectura (propuesta alternativa)
 

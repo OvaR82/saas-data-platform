@@ -20,7 +20,8 @@ Corrida completa de los 6 tenants (`make run`), semestre 2025-01-01 a 2025-06-30
 | Etapa | Filas | Detalle |
 |---|---|---|
 | CSV de entrada | 3 115 | 6 tenants: SV, HN, EC, JM, GT, PE |
-| Bronze | 3 075 | Las 40 restantes van a `bronze_quarantine` (fecha nula o inválida) |
+| Bronze: `deliveries` | 3 075 | Las 40 restantes van a `bronze_quarantine` (fecha nula o inválida) |
+| Bronze: `materials` | 35 por tenant | Snapshot del catálogo; Silver construye `dim_materials` desde aquí |
 | Silver: duplicados exactos | 15 | Se conserva una copia |
 | Silver: descartadas | 188 | `tipo_entrega` COBR o Z99: se cuentan, no se guardan |
 | Silver: cuarentena | 75 | Cantidad ≤ 0 o nula, material fuera de catálogo |
@@ -104,7 +105,7 @@ final se listan los fallidos y el proceso termina con código distinto de cero.
 
 ```bash
 make lint             # ruff check + ruff format --check (PEP8, imports, bugs comunes)
-make test             # pytest: 35 pruebas, con Spark real (en modo ANSI)
+make test             # pytest: 39 pruebas, con Spark real (en modo ANSI)
 make validate-config  # carga todas las combinaciones de ambiente y tenant
 make format           # corrige el formato automáticamente
 ```
@@ -138,6 +139,7 @@ La prueba se demuestra en local, pero el código está preparado para Databricks
 | PySpark y Delta | No son dependencias del paquete (los aporta el runtime); instalarlo no pisa el Spark del cluster |
 | Modo ANSI (activado por defecto en serverless) | Fechas, casts y divisiones usan `try_to_timestamp`, `try_cast` y `try_divide`; los tests corren con ANSI activado |
 | Rutas | Ninguna fija en el código: configuración (`config_dir`) y datos (`paths.*`) se pasan por parámetro |
+| Tablas por nombre de Unity Catalog | `storage.mode=catalog`: las mismas capas leen y escriben `saas_<env>.<layer>_<tenant>.<tabla>` en lugar de rutas (probado en local contra el catálogo de Spark) |
 
 **Ejemplo en un notebook**, con el repo clonado como *Git folder* del workspace:
 
@@ -154,8 +156,8 @@ run(
     tenant_selection="all",
     layers=list(LAYER_ORDER),
     overrides=[
-        "paths.raw=/Volumes/<catalogo>/<schema>/<volumen>/raw",
-        "paths.root=abfss://<contenedor>@<cuenta>.dfs.core.windows.net/saas/qa",
+        "paths.raw=/Volumes/<catalogo>/<schema>/<volumen>/raw",  # CSV de entrada
+        "storage.mode=catalog",  # tablas saas_qa.<layer>_<tenant>.<tabla>
     ],
     config_dir=REPO / "config",
 )
@@ -168,12 +170,13 @@ Limitaciones a tener en cuenta:
 
 - **No se ejecutó en un workspace real**: la compatibilidad está diseñada y probada en local (con
   ANSI activado), no validada en Databricks.
-- **Tablas por ruta, no por nombre**: como pide la sección 5.2 del enunciado, las tablas se leen y
-  escriben por ruta. En Databricks eso requiere una *external location* de Unity Catalog con
-  permisos sobre la ruta de ADLS. En workspaces solo con Unity Catalog y sin external locations
-  (por ejemplo, la Free Edition), lo recomendado es usar tablas por nombre
-  (`saas_<env>.<layer>_<tenant>.<tabla>`): es el paso de migración que describe la arquitectura
-  y está propuesto en `observations.md` (H5 y H8).
+- **Ruta o nombre de tabla**: por defecto (`storage.mode=path`) las tablas se leen y escriben por
+  ruta, como pide la sección 5.2; en Databricks eso requiere una *external location* con
+  permisos sobre la ruta de ADLS. Con `storage.mode=catalog` se usan los nombres de Unity Catalog
+  de la arquitectura, que es lo recomendado en workspaces solo con Unity Catalog (como la Free
+  Edition). El catálogo (`saas_<env>`) y sus schemas los crea Terraform (`docs/infra.md`); si no
+  existen, el pipeline intenta crearlos (`CREATE SCHEMA IF NOT EXISTS`), lo que requiere
+  permisos. Ver `observations.md` A15.
 - **Configuraciones de Spark en serverless**: `get_spark()` fija la zona horaria (UTC) y la
   política de parseo de fechas. Serverless solo permite cambiar algunas configuraciones; conviene
   confirmar que esas dos están permitidas en el workspace de destino.
@@ -184,7 +187,8 @@ Limitaciones a tener en cuenta:
 flowchart TD
     RAW["RAW<br/>data/raw/*.csv"] -->|"overwrite del rango<br/>(replaceWhere)"| BRONZE["BRONZE<br/>{tenant}/deliveries<br/>strings + columnas técnicas"]
     RAW -.->|"fecha nula o inválida"| BQ["bronze_quarantine"]
-    CAT["materials_catalog.csv"] -->|"MERGE (material, valid_from)"| DIM["SILVER<br/>{tenant}/dim_materials<br/>SCD Type 2"]
+    CAT["RAW<br/>materials_catalog.csv"] -->|"snapshot"| BMAT["BRONZE<br/>{tenant}/materials<br/>strings + columnas técnicas"]
+    BMAT -->|"MERGE (material, valid_from)"| DIM["SILVER<br/>{tenant}/dim_materials<br/>SCD Type 2"]
     BRONZE -->|"dedupe · descarte · tipos · CS→ST · flags"| JOIN{{"join temporal<br/>fecha BETWEEN valid_from AND valid_to"}}
     DIM --> JOIN
     JOIN -->|"MERGE por clave de negocio<br/>acotado al rango"| FACT["SILVER<br/>{tenant}/fact_deliveries"]
@@ -192,11 +196,14 @@ flowchart TD
     FACT --> CHECKS{{"checks de calidad<br/>critical · warning · info"}}
     CHECKS -->|"se registran siempre"| QL["shared/quality_logs"]
     CHECKS -->|"si no hay críticos fallidos<br/>(o fail_on_critical=false)"| GOLD["GOLD<br/>{tenant}/daily_metrics_by_delivery_type<br/>{tenant}/top_materials_by_month<br/>recálculo del rango"]
+    GOLD -->|"agregación independiente de Silver"| GCHECK{{"check de Gold"}}
+    GCHECK -->|"se registra"| QL
 ```
 
 | Capa | Tabla | Escritura | Partición |
 |---|---|---|---|
 | Bronze | `deliveries` | Overwrite del rango de fechas (`replaceWhere`) | `fecha_proceso` |
+| Bronze | `materials` | Overwrite completo (el catálogo llega como snapshot) | — |
 | Silver | `fact_deliveries` | `MERGE` por `(tenant_id, fecha_proceso, transporte, ruta, material, tipo_entrega)` | `fecha_proceso` |
 | Silver | `dim_materials` | `MERGE` SCD2 por `(material, valid_from)`; la historia nunca se borra | — |
 | Gold | `daily_metrics_by_delivery_type` | Recálculo del rango (`replaceWhere`) | — (ver D1) |
@@ -255,6 +262,8 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `execution.fail_fast` | `false` | Abortar `--tenant all` ante el primer fallo |
 | `quality.fail_on_critical` | `false` (`true` en `main`) | Detener el tenant antes de Gold si falla un check crítico |
 | `quality.max_quarantine_rate` | `0.05` | Umbral del warning de tasa de cuarentena |
+| `storage.mode` | `path` | `path`: tablas por ruta (layout de 5.2); `catalog`: nombres de Unity Catalog |
+| `storage.catalog` | `saas_${env}` | Catálogo usado en modo `catalog` |
 | `gold.top_materials_n` | `5` | Materiales por tenant y mes en `top_materials_by_month` |
 | `business.units_per_case` | `20` | Factor CS → ST |
 | `business.routine_delivery_types` / `bonus_delivery_types` | `[ZPRE, ZVE1]` / `[Z04, Z05]` | Tipos válidos; el resto se descarta |
@@ -284,9 +293,14 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `single_current_version` | Silver | critical | SCD2: exactamente una versión vigente por material |
 | `no_overlapping_versions` | Silver | critical | SCD2: las versiones de un material no se solapan |
 | `no_version_gaps` | Silver | warning | SCD2: no hay fechas sin versión vigente entre dos versiones de un material |
+| `gold_reconciles_with_silver` | Gold | critical | Cada día y tipo de entrega de Gold suma las mismas unidades e ingreso que Silver (agregación independiente) |
 | `row_reconciliation` | Silver | critical | Leídas = duplicados + descartadas + cuarentena + escritas |
 | `quarantine_rate` | Silver | warning | La cuarentena no supera `max_quarantine_rate` |
 | `discarded_delivery_types` | Silver | info | Cuántas filas se descartaron por tipo de entrega |
+
+Los checks de Bronze y Silver se ejecutan **antes** de Gold y, con `fail_on_critical`, impiden
+publicarlo. El de Gold se ejecuta **después** de escribirlo: detecta una agregación incorrecta y
+marca el tenant como fallido, pero no puede impedir la publicación.
 
 Cada corrida agrega sus resultados a `quality_logs` con el esquema de la sección 5.9 (`_run_id`,
 `_batch_id`, `tenant_id`, `layer`, `table_name`, `check_name`, `check_severity`,
@@ -324,7 +338,7 @@ saas-data-platform/
 │   ├── config.py               carga, validación y rutas
 │   ├── pipeline.py             orquestación por tenant y fail_fast
 │   ├── session.py              SparkSession local o la activa de Databricks
-│   ├── storage.py              escrituras Delta (replaceWhere, MERGE)
+│   ├── storage.py              lectura y escritura Delta por ruta o por nombre (replaceWhere, MERGE)
 │   ├── bronze.py · silver.py · gold.py
 │   └── quality.py              checks, quality_logs y puerta de calidad
 ├── tests/                      pytest

@@ -113,6 +113,11 @@ resource "databricks_secret_scope" "tenant" {
 
 ## Decisiones del snippet
 
+- **Mismos nombres que el pipeline**: los schemas que crea el módulo (`saas_<env>.<layer>_<tenant>`)
+  son exactamente los que usa el pipeline con `storage.mode=catalog` (`observations.md` A15). Con
+  Terraform creándolos, el `CREATE SCHEMA IF NOT EXISTS` del pipeline no hace nada.
+  Las cuarentenas (`<layer>_quarantine_<tenant>`) y `shared` siguen el mismo patrón; el snippet
+  muestra solo las tres capas para no pasar de unas 50 líneas.
 - **`for_each` sobre capas y carpetas**: agregar una capa (por ejemplo `platinum`) es agregar un
   elemento a la lista, no copiar un bloque.
 - **Grants con mínimo privilegio**: solo el service principal del pipeline modifica tablas; el grupo
