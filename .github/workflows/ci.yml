@@ -1,8 +1,16 @@
 name: ci
 
 on:
+  # Every pull request, plus pushes to main (merges). Without the branch filter, each push to a
+  # branch with an open PR would run the same job twice.
   push:
+    branches: [main]
   pull_request:
+
+# A newer commit on the same branch cancels the run that is still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint-test:
@@ -33,3 +41,10 @@ jobs:
 
       - name: Unit tests
         run: uv run pytest
+
+      # The wheel is what gets installed on Databricks: it must build and only require omegaconf.
+      - name: Build package
+        run: |
+          uv build --wheel -o dist
+          unzip -p dist/*.whl '*/METADATA' | grep '^Requires-Dist'
+          ! unzip -p dist/*.whl '*/METADATA' | grep -E '^Requires-Dist: (pyspark|delta-spark)'
