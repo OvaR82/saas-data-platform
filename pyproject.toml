@@ -3,10 +3,13 @@ name = "saas-pipeline"
 version = "0.1.0"
 description = "Multi-tenant Medallion pipeline (Bronze/Silver/Gold) on PySpark + Delta Lake"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+# The package runs on any Python >= 3.11 (on Databricks, the runtime's). The local environment
+# and CI use 3.11 (.python-version / `--python 3.11`): PySpark 3.5 does not officially support 3.12.
+requires-python = ">=3.11"
+# PySpark and Delta are not package dependencies: on Databricks the runtime provides them, and
+# installing them from PyPI on a cluster would replace the runtime's own Spark. Locally they come
+# from the `spark` dependency group, installed by default (see [tool.uv]).
 dependencies = [
-    "pyspark==3.5.3",
-    "delta-spark==3.2.1",
     "omegaconf==2.3.0",
 ]
 
@@ -14,16 +17,24 @@ dependencies = [
 saas-pipeline = "saas_pipeline.cli:main"
 
 [dependency-groups]
+spark = [
+    "pyspark==3.5.3",
+    "delta-spark==3.2.1",
+]
 dev = [
     "pytest==8.3.3",
     "ruff==0.7.4",
     "pre-commit==4.0.1",
 ]
-# Only for the demo notebook; not installed by CI (`uv sync` installs `dev` only).
+# Only for the demo notebook; not a default group, so CI does not install it.
 demo = [
     "jupyterlab==4.3.1",
     "ipykernel==6.29.5",
 ]
+
+[tool.uv]
+# `uv sync` / `uv run` install these groups unless told otherwise (local dev and CI).
+default-groups = ["spark", "dev"]
 
 [build-system]
 requires = ["hatchling"]
