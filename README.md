@@ -111,12 +111,24 @@ make format           # corrige el formato automáticamente
 make infra-validate   # terraform fmt + validate del snippet de docs/infra.md (requiere Terraform)
 ```
 
-Las pruebas cubren: configuración y precedencia, validación de fechas, idempotencia de Bronze y
-reproceso por rango, conversión de unidades, flags, join temporal SCD2, cuarentena con todos sus
-motivos, métricas Gold, ranking mensual y su reproceso por mes completo, checks de calidad y su persistencia, la puerta `fail_on_critical`, una
-corrida completa repetida y el refactor de mentoría.
+Las pruebas cubren:
 
-El mismo conjunto corre en GitHub Actions en cada push y pull request
+- **Configuración**: precedencia, rutas por ambiente, fechas estrictas `YYYY-MM-DD` y errores de
+  configuración sin traceback.
+- **Bronze**: validación de fechas, columnas técnicas, idempotencia, reproceso de un rango y el
+  snapshot del catálogo.
+- **Silver**: casts seguros con valores basura, conversión de unidades, flags, join temporal
+  SCD2 y cuarentena con todos sus motivos (incluido "SKU sin versión vigente").
+- **Gold**: métricas diarias, ranking mensual y su recálculo por mes completo.
+- **Calidad**: invariantes SCD2 (solapamientos, huecos, una versión vigente), conciliación, check
+  de Gold contra Silver, esquema de `quality_logs` y la puerta `fail_on_critical`.
+- **De punta a punta**: corrida completa repetida (idempotencia), por ruta y por nombre de tabla
+  (`storage.mode=catalog`).
+- **Mentoría**: el refactor de `good_code.py`.
+
+Toda la suite corre con el modo ANSI de Spark activado (el más estricto, por defecto en
+Databricks serverless). En GitHub Actions corre en cada pull request y en cada push a `main`,
+junto con el linter, la validación de los YAML y el armado del wheel
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Notebook de demo
@@ -178,6 +190,12 @@ Limitaciones a tener en cuenta:
   Edition). El catálogo (`saas_<env>`) y sus schemas los crea Terraform (`docs/infra.md`); si no
   existen, el pipeline intenta crearlos (`CREATE SCHEMA IF NOT EXISTS`), lo que requiere
   permisos. Ver `observations.md` A15.
+- **El modo `catalog` en local**: funciona contra el catálogo propio de Spark (`spark_catalog`),
+  pero ese catálogo vive en memoria y se pierde al terminar el proceso, mientras las tablas
+  quedan en disco. Por eso desde la CLI corre bien una vez por carpeta y la segunda corrida
+  falla (`DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION`). En Databricks no ocurre (Unity Catalog es
+  persistente). Para verificarlo en local: `uv run pytest tests/test_catalog_mode.py`, que corre
+  el pipeline dos veces dentro de la misma sesión.
 - **Configuraciones de Spark en serverless**: `get_spark()` fija la zona horaria (UTC) y la
   política de parseo de fechas. Serverless solo permite cambiar algunas configuraciones; conviene
   confirmar que esas dos están permitidas en el workspace de destino.
@@ -230,8 +248,11 @@ Un ranking mensual calculado con parte de un mes sería incorrecto, así que el 
 
 Puntos clave:
 
-- **Aislamiento multi-tenant** por ruta (`<layer>/<tenant>/<table>`), equivalente a un schema por
-  tenant en Unity Catalog (`saas_<env>.<layer>_<tenant>.<table>`).
+- **Aislamiento multi-tenant** por ruta (`<layer>/<tenant>/<table>`) o, con
+  `storage.mode=catalog`, por schema de Unity Catalog (`saas_<env>.<layer>_<tenant>.<table>`):
+  las capas reciben una referencia de tabla y no saben cuál de los dos usan.
+- **Cada capa lee solo la anterior**: también el catálogo de materiales pasa por Bronze antes de
+  llegar a `dim_materials`.
 - **Join temporal**: cada entrega toma la versión del material vigente en su `fecha_proceso`, no la
   actual. Un material sin versión vigente va a cuarentena, no se pierde en el join.
 - **Cuarentena con todos los motivos** de una fila (`non_positive_cantidad;material_not_in_catalog`).
@@ -294,10 +315,10 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `single_current_version` | Silver | critical | SCD2: exactamente una versión vigente por material |
 | `no_overlapping_versions` | Silver | critical | SCD2: las versiones de un material no se solapan |
 | `no_version_gaps` | Silver | warning | SCD2: no hay fechas sin versión vigente entre dos versiones de un material |
-| `gold_reconciles_with_silver` | Gold | critical | Cada día y tipo de entrega de Gold suma las mismas unidades e ingreso que Silver (agregación independiente) |
 | `row_reconciliation` | Silver | critical | Leídas = duplicados + descartadas + cuarentena + escritas |
 | `quarantine_rate` | Silver | warning | La cuarentena no supera `max_quarantine_rate` |
 | `discarded_delivery_types` | Silver | info | Cuántas filas se descartaron por tipo de entrega |
+| `gold_reconciles_with_silver` | Gold | critical | Cada día y tipo de entrega de Gold suma las mismas unidades e ingreso que Silver (agregación independiente) |
 
 Los checks de Bronze y Silver se ejecutan **antes** de Gold y, con `fail_on_critical`, impiden
 publicarlo. El de Gold se ejecuta **después** de escribirlo: detecta una agregación incorrecta y
@@ -322,7 +343,7 @@ y secret scope. Detalle en [docs/onboarding-tenant.md](docs/onboarding-tenant.md
 
 ```
 saas-data-platform/
-├── .github/workflows/ci.yml    CI: ruff, validación de YAML y pytest
+├── .github/workflows/ci.yml    CI: ruff, validación de YAML, pytest y armado del wheel
 ├── config/                     configuración jerárquica (base, env, tenants)
 ├── data/raw/                   CSV de entrada (el resto de data/ se genera y no se versiona)
 ├── docs/
@@ -337,14 +358,14 @@ saas-data-platform/
 ├── scripts/                    validación del snippet de Terraform (make infra-validate)
 ├── src/saas_pipeline/
 │   ├── cli.py                  entrada de línea de comandos
-│   ├── config.py               carga, validación y rutas
+│   ├── config.py               carga y validación; ubicación de cada tabla (ruta o nombre UC)
 │   ├── pipeline.py             orquestación por tenant y fail_fast
 │   ├── session.py              SparkSession local o la activa de Databricks
 │   ├── storage.py              lectura y escritura Delta por ruta o por nombre (replaceWhere, MERGE)
 │   ├── bronze.py · silver.py · gold.py
 │   └── quality.py              checks, quality_logs y puerta de calidad
 ├── tests/                      pytest
-├── Makefile                    setup, lint, test, run, notebook, clean
+├── Makefile                    setup, lint, test, run, notebook, infra-validate, clean
 ├── pyproject.toml · uv.lock    dependencias fijadas
 └── .pre-commit-config.yaml     ruff antes de cada commit
 ```
@@ -390,8 +411,8 @@ Comportamientos actuales que conviene conocer antes de llevar esto a producción
   (`observations.md` A9 y H1).
 - **Sin evolución de esquema automática.** Agregar una columna a una tabla existente (por ejemplo,
   una métrica nueva en Gold) requiere una migración explícita o `mergeSchema`: a propósito, las
-  escrituras con `replaceWhere` y `MERGE` fallan si el esquema cambia. La única excepción es la
-  cuarentena de Bronze, que se reconstruye entera en cada corrida.
+  escrituras con `replaceWhere` y `MERGE` fallan si el esquema cambia. Las excepciones son las dos
+  tablas de Bronze que se reconstruyen enteras en cada corrida: la cuarentena y `materials`.
 - **`dim_materials` nunca borra versiones.** Una versión cargada por error se corrige de forma
   explícita (cerrándola o borrándola con un cambio deliberado), no se pisa en la siguiente corrida.
 
