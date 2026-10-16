@@ -24,19 +24,36 @@ def good_code():
     return module
 
 
-def row(pais="GT", fecha="20250314", tipo="ZPRE", precio="1.5", cantidad="2", unidad="CS", ruta=1):
+def row(
+    country="GT",
+    process_date="20250314",
+    delivery_type="ZPRE",
+    price="1.5",
+    quantity="2",
+    unit="CS",
+    route=1,
+):
     """Return one source row; each test overrides only the fields it cares about."""
-    return (pais, fecha, 1, ruta, tipo, "AA004003", Decimal(precio) if precio else None,
-            Decimal(cantidad) if cantidad else None, unidad)  # fmt: skip
+    return (
+        country,
+        process_date,
+        1,
+        route,
+        delivery_type,
+        "AA004003",
+        Decimal(price) if price else None,
+        Decimal(quantity) if quantity else None,
+        unit,
+    )
 
 
 def test_keeps_the_original_business_rules(spark, good_code):
     """Routine only, CS x 20, revenue = units x price, and 'GT'/'gt' are the same tenant."""
     rows = [
-        row(unidad="CS", ruta=1),  # 2 CS -> 40 ST, revenue 60
-        row(pais="gt", unidad="ST", cantidad="5", ruta=2),  # lowercase source still matches
-        row(tipo="Z04", ruta=3),  # bonus: not part of this report
-        row(pais="SV", ruta=4),  # another tenant
+        row(unit="CS", route=1),  # 2 CS -> 40 ST, revenue 60
+        row(country="gt", unit="ST", quantity="5", route=2),  # lowercase source still matches
+        row(delivery_type="Z04", route=3),  # bonus: not part of this report
+        row(country="SV", route=4),  # another tenant
     ]
     df = spark.createDataFrame(rows, COLUMNS)
     valid, rejected = good_code.routine_deliveries(df, "gt", ["ZPRE", "ZVE1"], 20)
@@ -49,14 +66,14 @@ def test_keeps_the_original_business_rules(spark, good_code):
 def test_rejects_what_the_original_published_silently(spark, good_code):
     """Rows that bad_code.py would have published with wrong values are rejected with a reason."""
     rows = [
-        row(cantidad="-3", ruta=1),
-        row(cantidad=None, ruta=2),
-        row(unidad="KG", ruta=3),  # bad_code.py counted any non-CS unit as ST
-        row(precio=None, ruta=4),
-        row(fecha=None, ruta=5),
-        row(fecha="2025-03-15", ruta=6),
-        row(ruta=7),
-        row(ruta=7),  # exact duplicate: kept once
+        row(quantity="-3", route=1),
+        row(quantity=None, route=2),
+        row(unit="KG", route=3),  # bad_code.py counted any non-CS unit as ST
+        row(price=None, route=4),
+        row(process_date=None, route=5),
+        row(process_date="2025-03-15", route=6),
+        row(route=7),
+        row(route=7),  # exact duplicate: kept once
     ]
     df = spark.createDataFrame(rows, COLUMNS)
     valid, rejected = good_code.routine_deliveries(df, "gt", ["ZPRE", "ZVE1"], 20)
