@@ -108,6 +108,7 @@ make lint             # ruff check + ruff format --check (PEP8, imports, bugs co
 make test             # pytest: 45 pruebas, con Spark real (en modo ANSI)
 make validate-config  # carga todas las combinaciones de ambiente y tenant
 make format           # corrige el formato automáticamente
+make infra-validate   # terraform fmt + validate del snippet de docs/infra.md (requiere Terraform)
 ```
 
 Las pruebas cubren: configuración y precedencia, validación de fechas, idempotencia de Bronze y
@@ -333,6 +334,7 @@ saas-data-platform/
 │   ├── good_code.py            refactor
 │   └── code_review.md          revisión y nota al junior
 ├── notebooks/demo.ipynb        notebook de la demo
+├── scripts/                    validación del snippet de Terraform (make infra-validate)
 ├── src/saas_pipeline/
 │   ├── cli.py                  entrada de línea de comandos
 │   ├── config.py               carga, validación y rutas

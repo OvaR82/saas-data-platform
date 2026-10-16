@@ -7,7 +7,7 @@ LAYERS ?= bronze,silver,gold
 # Same default as config/base.yaml (paths.data_root)
 DATA_ROOT ?= $(or $(SAAS_DATA_ROOT),data)
 
-.PHONY: help setup lint format test validate-config run notebook clean
+.PHONY: help setup lint format test validate-config run notebook infra-validate clean
 
 help:
 	@grep -E '^[a-z-]+:' Makefile | cut -d: -f1
@@ -36,6 +36,9 @@ run:
 
 notebook:  ## Open the demo notebook (Jupyter runs in WSL, open the printed URL in the browser)
 	uv run --group demo jupyter lab --no-browser --notebook-dir=notebooks
+
+infra-validate:  ## terraform fmt + validate of the snippet in docs/infra.md (needs Terraform)
+	bash scripts/validate_infra_snippet.sh
 
 clean:  ## Remove generated layers under DATA_ROOT (never touches data/raw)
 	rm -rf $(addprefix $(DATA_ROOT)/,bronze silver gold bronze_quarantine silver_quarantine shared mentoring qa main)
