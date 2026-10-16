@@ -6,7 +6,7 @@ calcula el total y lo escribe en Parquet. El refactor está en
 [`good_code.py`](good_code.py) y sus pruebas en [`tests/test_mentoring.py`](../tests/test_mentoring.py).
 
 Las líneas citadas corresponden a `bad_code.py`. Las afirmaciones marcadas con 🔎 se verificaron
-ejecutando la lógica original sobre el dataset real de la prueba.
+ejecutando la lógica original sobre el dataset real de la prueba (pandas 2.2 y PySpark 3.5).
 
 ## Lo que está bien
 
@@ -24,13 +24,27 @@ Es una buena base: los problemas están en **cómo** se ejecuta, no en **qué** 
 | 1 | Publica datos incorrectos sin avisar | Alta | 11–22 |
 | 2 | Procesa en pandas, fila por fila, en una sola máquina | Alta | 7, 10, 23–24 |
 | 3 | Se rompe con un país sin datos y no maneja errores | Alta | 8, 24, 26 |
-| 4 | Escritura frágil: no atómica, sin alcance y en `/tmp` | Alta | 25 |
+| 4 | Escritura no idempotente ni atómica, y en `/tmp` | Alta | 25 |
 | 5 | Reglas de negocio y rutas escritas en el código | Media | 11, 13, 25, 29 |
 | 6 | Ejecuta trabajo al importar el módulo | Media | 4, 29 |
 | 7 | Tipos inferidos y `float` para dinero | Media | 7 |
 | 8 | Multi-tenant resuelto con un literal sensible a mayúsculas | Media | 8, 29 |
 | 9 | Legibilidad: nombres, `print`, sin tipos ni docstrings | Baja | 6, 10, 16–22, 26–27 |
 | 10 | Sin pruebas | Media | — |
+
+**Cobertura de las áreas de mejora que plantea la consigna:**
+
+| Área | Observaciones |
+|---|---|
+| Uso de pandas donde corresponde Spark nativo | 2 |
+| Iteración fila por fila | 2 |
+| Lógica de negocio hardcodeada | 5 |
+| Ausencia de validaciones y tipado | 1, 7, 9 |
+| Naming inconsistente | 9 |
+| Manejo de errores inexistente | 3 |
+| Escritura no idempotente | 4 |
+| Ausencia de tests | 10 |
+| Falta de soporte multi-tenant | 8 |
 
 ---
 
@@ -86,16 +100,18 @@ haría fallar el job completo con un error que no explica la causa.
 filas), registrar el resultado con `logging` y devolver un código de salida distinto de cero cuando
 algo falla, para que el orquestador lo detecte.
 
-## 4. Escritura frágil: no atómica, sin alcance y en `/tmp` — **Alta**
+## 4. Escritura no idempotente ni atómica, y en `/tmp` — **Alta**
 
 **Qué está mal.** `write.mode("overwrite").parquet("/tmp/output/" + country)` (línea 25).
 
 **Por qué importa.**
+- **No es idempotente de forma confiable:** reejecutar con la misma entrada da el mismo resultado
+  solo si nada falla durante la escritura; y como el destino es todo el país, no hay forma de
+  reprocesar un día o un rango sin reescribir toda su historia. Una escritura idempotente
+  reemplaza exactamente lo que se reprocesa, la ejecute una o diez veces.
 - **No es atómica:** Parquet en modo `overwrite` borra la carpeta y luego escribe. Si el proceso se
   cae en el medio, el país queda sin datos o con datos a medias, y un lector concurrente puede ver
   la carpeta vacía.
-- **Sin alcance:** cada ejecución reescribe toda la historia del país. No hay forma de reprocesar
-  un solo día sin recalcular todo.
 - **`/tmp` es efímero:** se borra al reiniciar la máquina o el cluster.
 
 **Cómo se corrige.** Escribir en **Delta Lake** (transaccional: o se escribe todo o nada) y
