@@ -285,16 +285,46 @@ memoria) de la función `run()`, la única que lee y escribe.
 
 ## Qué dejé fuera y por qué
 
-| Fuera de alcance | Por qué | Dónde se retoma |
+Primero se completó y probó todo el alcance obligatorio; los bonus se evaluaron después, por costo
+y por valor para la entrega.
+
+### Bonus incluidos
+
+| Bonus | Por qué se incluyó | Dónde |
 |---|---|---|
-| Segunda tabla Gold | **Incluido** (era bonus): `top_materials_by_month`, top N materiales por revenue por tenant y mes | Ver "Segunda tabla Gold" |
-| Ingesta con Auto Loader / streaming | Bonus. El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
-| Dashboard | Bonus. El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
-| Terraform funcional (`plan` contra una cuenta real) | Bonus. Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |
-| Ejecución en Databricks | El enunciado pide demostrarlo localmente; el código es compatible (reusa la sesión activa, sin rutas absolutas) | `observations.md` H5 |
-| Framework de calidad (Great Expectations, DLT expectations) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
+| Segunda tabla Gold | Reutiliza Silver tal cual y muestra criterio (recálculo por mes completo, SCD2 dentro del mes) con poco código | `top_materials_by_month`, ver "Segunda tabla Gold" |
+| Pre-commit hooks | Costo casi nulo; evita commits que el CI rechazaría y versionar salidas del notebook | `.pre-commit-config.yaml` |
+
+### Fuera de alcance
+
+| Elemento | Por qué | Dónde se retoma |
+|---|---|---|
+| Ingesta con Auto Loader / streaming (bonus) | El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
+| Dashboard (bonus) | El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
+| Terraform funcional, `plan` contra una cuenta real (bonus) | Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |
+| Ejecución en Databricks | El enunciado pide demostrarlo localmente; el código es compatible (reusa la sesión activa, sin rutas absolutas) | `observations.md` H5 y H8 |
+| Framework de calidad (Great Expectations, expectations de pipelines declarativos) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
 | Paralelismo entre tenants | Con este volumen el tiempo es costo fijo de Spark/Delta; en producción, una tarea por tenant | `observations.md` H5 |
-| Pre-commit hooks | **Incluido** (era bonus): bajo costo y evita commits que el CI rechazaría | — |
+| MongoDB / Couchbase | Están en el stack como "provisto en arquitectura"; la prueba trabaja con CSV | `observations.md` H7 |
+
+### Limitaciones conocidas
+
+Comportamientos actuales que conviene conocer antes de llevar esto a producción:
+
+- **Filas de un país sin tenant configurado.** Si el CSV trae un `pais` que no tiene
+  `config/tenants/<code>.yaml`, esas filas no se procesan (quedan en RAW) y hoy ningún check lo
+  avisa. Es coherente con el onboarding explícito, pero falta un check de "filas sin tenant" a
+  nivel de corrida.
+- **El SCD2 depende de que la fuente traiga la historia.** El catálogo ya llega con `valid_from` y
+  `valid_to`. Si una fuente enviara solo la versión nueva sin cerrar la anterior, el check crítico
+  de solapamiento lo detecta, pero el pipeline no cierra la versión vieja automáticamente
+  (`observations.md` A9 y H1).
+- **Sin evolución de esquema automática.** Agregar una columna a una tabla existente (por ejemplo,
+  una métrica nueva en Gold) requiere una migración explícita o `mergeSchema`: a propósito, las
+  escrituras con `replaceWhere` y `MERGE` fallan si el esquema cambia. La única excepción es la
+  cuarentena de Bronze, que se reconstruye entera en cada corrida.
+- **`dim_materials` nunca borra versiones.** Una versión cargada por error se corrige de forma
+  explícita (cerrándola o borrándola con un cambio deliberado), no se pisa en la siguiente corrida.
 
 ## Convenciones
 
