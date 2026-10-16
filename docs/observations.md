@@ -7,7 +7,7 @@ sin dejarla registrada aquí.
 
 | Tipo | Entradas | Qué contiene |
 |---|---|---|
-| Ambigüedades resueltas | A1–A11 | Huecos del enunciado y cómo se resolvieron en el código |
+| Ambigüedades resueltas | A1–A12 | Huecos del enunciado y cómo se resolvieron en el código |
 | Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
 | Mejoras (Horizonte 2-3) | H1–H8 | Evolución tecnológica propuesta; H8 integra todas en una plataforma objetivo con criterio de costo |
 
@@ -68,6 +68,19 @@ Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver)
 ### A11. Columnas de fecha en Silver
 - **Arquitectura**: fechas de negocio con tipo `date`; `fecha_proceso` es la clave de partición con formato `YYYYMMDD`.
 - **Decisión**: se conservan ambas: `fecha_proceso` (string `yyyymmdd`, partición y clave del MERGE, igual que en Bronze y en los paths) y `fecha_proceso_date` (`date`, usada en el join temporal y para consumo analítico).
+
+### A12. Recálculo de Gold por mes completo en la tabla mensual
+- **Arquitectura**: 5.5 define el recálculo de Gold "por partición de fecha".
+- **Problema**: la segunda tabla Gold (`top_materials_by_month`, bonus) es un ranking mensual.
+  Recalcularla solo con las fechas del rango procesado daría un ranking incorrecto: reprocesar del
+  10 al 20 de marzo dejaría un "top de marzo" calculado con 11 días.
+- **Decisión**: el rango se amplía a meses completos (del primer día del mes inicial al último día
+  del mes final), se leen de Silver esos meses y se reemplazan con `replaceWhere` sobre
+  `month_start`. Se mantiene el principio de 5.5 (Gold es derivado y se recalcula entero para lo
+  que toca), aplicado a la granularidad de la tabla. La tabla diaria sigue el recálculo por fecha.
+- **Verificación**: `test_partial_range_recomputes_the_whole_month` reprocesa del 10 al 20 de
+  marzo y comprueba que el ranking de marzo es idéntico al de la corrida completa y que los demás
+  meses no se tocaron.
 
 ## Desacuerdos con la arquitectura (propuesta alternativa)
 
