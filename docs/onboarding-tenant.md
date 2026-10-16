@@ -44,9 +44,11 @@ El pipeline toma del CSV las filas con `pais = CR` (normalizado a minúscula), y
 
 ```
 <data_root>/bronze/cr/deliveries/
+<data_root>/bronze/cr/materials/
 <data_root>/silver/cr/fact_deliveries/
 <data_root>/silver/cr/dim_materials/
 <data_root>/gold/cr/daily_metrics_by_delivery_type/
+<data_root>/gold/cr/top_materials_by_month/
 <data_root>/bronze_quarantine/cr/deliveries/
 <data_root>/silver_quarantine/cr/fact_deliveries/
 ```
@@ -65,9 +67,13 @@ Desde ese momento `--tenant all` también lo incluye.
 
 El mismo archivo YAML alimenta a Terraform (ver [infra.md](infra.md)), que crea:
 
-- los schemas `saas_<env>.bronze_cr`, `silver_cr` y `gold_cr`;
-- las carpetas en ADLS y los grants (el grupo `saas-<env>-cr-readers` solo lee Gold);
+- los schemas `saas_<env>.bronze_cr`, `silver_cr`, `gold_cr`, `bronze_quarantine_cr` y
+  `silver_quarantine_cr`, con sus carpetas en ADLS;
+- los grants (el grupo `saas-<env>-cr-readers` solo lee Gold);
 - el secret scope `saas-<env>-cr` para las credenciales de sus fuentes.
+
+Con `storage.mode=catalog`, el pipeline escribe exactamente en esos schemas
+(`saas_<env>.silver_cr.fact_deliveries`, …) y `quality_logs` en `saas_<env>.shared`.
 
 Orden recomendado: `terraform apply` en `qa` → corrida del pipeline en `qa` → revisión de
 `quality_logs` → `terraform apply` y corrida en `main`.
