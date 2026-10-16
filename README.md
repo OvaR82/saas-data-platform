@@ -105,7 +105,7 @@ final se listan los fallidos y el proceso termina con código distinto de cero.
 
 ```bash
 make lint             # ruff check + ruff format --check (PEP8, imports, bugs comunes)
-make test             # pytest: 39 pruebas, con Spark real (en modo ANSI)
+make test             # pytest: 45 pruebas, con Spark real (en modo ANSI)
 make validate-config  # carga todas las combinaciones de ambiente y tenant
 make format           # corrige el formato automáticamente
 ```
