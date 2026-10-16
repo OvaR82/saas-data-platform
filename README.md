@@ -373,6 +373,22 @@ saas-data-platform/
 Cada capa separa las transformaciones puras (`DataFrame -> DataFrame`, probadas con datos en
 memoria) de la función `run()`, la única que lee y escribe.
 
+**Diferencias con la estructura sugerida (Anexo B).** Están todos los archivos del anexo; se
+agregan:
+
+- `data/raw/` **versionado**: el anexo pide no versionar el contenido de `data/` porque se genera
+  al ejecutar. Los dos CSV de entrada sí se versionan (son pequeños y sin ellos el repo no es
+  reproducible); todo lo generado (`bronze/`, `silver/`, `gold/`, cuarentenas, `shared/`) está en
+  `.gitignore` y además puede vivir fuera del repo con `SAAS_DATA_ROOT`.
+- `src/saas_pipeline/`: `pipeline.py` (orquestación por tenant), `session.py` (sesión de Spark)
+  y `storage.py` (lectura y escritura Delta por ruta o por nombre), para que las capas no repitan
+  esa lógica.
+- `tests/`: además de los dos del anexo, tests de configuración, Bronze, Gold, de punta a punta,
+  del modo `catalog` y de la mentoría.
+- Un YAML por cada uno de los 6 tenants del dataset (el anexo muestra solo `sv.yaml`).
+- `notebooks/` (demo), `scripts/` (validación de Terraform), `uv.lock` y `.python-version`
+  (entorno reproducible) y `.pre-commit-config.yaml` (bonus).
+
 ## Qué dejé fuera y por qué
 
 Primero se completó y probó todo el alcance obligatorio; los bonus se evaluaron después, por costo
