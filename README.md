@@ -384,6 +384,7 @@ y por valor para la entrega.
 |---|---|---|
 | Segunda tabla Gold | Reutiliza Silver tal cual y muestra criterio (recálculo por mes completo, SCD2 dentro del mes) con poco código | `top_materials_by_month`, ver "Segunda tabla Gold" |
 | Pre-commit hooks | Costo casi nulo; evita commits que el CI rechazaría y versionar salidas del notebook | `.pre-commit-config.yaml` |
+| Terraform funcional (**parcial**) | Hecho: `terraform fmt` y `terraform validate` pasan contra los providers reales (azurerm 4.x, databricks 1.x), lo que verifica sintaxis, tipos y atributos. Falta: `terraform plan`, que necesita credenciales de una suscripción de Azure y un workspace de Databricks | `docs/infra.md`, `make infra-validate` |
 
 ### Fuera de alcance
 
@@ -391,7 +392,7 @@ y por valor para la entrega.
 |---|---|---|
 | Ingesta con Auto Loader / streaming (bonus) | El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
 | Dashboard (bonus) | El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
-| Terraform funcional, `plan` contra una cuenta real (bonus) | Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |
+| `terraform plan` contra una cuenta real (resto del bonus de Terraform) | Requiere una suscripción de Azure y un workspace de Databricks, con su costo, para una prueba que se demuestra en local | `docs/infra.md` |
 | Ejecución en un workspace de Databricks | El enunciado pide demostrarlo localmente; el código está preparado (ver "Ejecutar en Databricks") pero no se validó en un workspace real | `observations.md` H5 y H8 |
 | Framework de calidad (Great Expectations, expectations de pipelines declarativos) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
 | Paralelismo entre tenants | Con este volumen el tiempo es costo fijo de Spark/Delta; en producción, una tarea por tenant | `observations.md` H5 |
