@@ -9,7 +9,7 @@ sin dejarla registrada aquí.
 |---|---|---|
 | Ambigüedades resueltas | A1–A11 | Huecos del enunciado y cómo se resolvieron en el código |
 | Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
-| Mejoras (Horizonte 2-3) | H1–H7 | Evolución tecnológica propuesta |
+| Mejoras (Horizonte 2-3) | H1–H8 | Evolución tecnológica propuesta; H8 integra todas en una plataforma objetivo con criterio de costo |
 
 Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver), **D3**
 (aislamiento por schema frente a catálogo) y **D5** (la clave de negocio no identifica una entrega).
@@ -173,3 +173,52 @@ pero la prueba trabaja con un CSV. Cómo encajarían sin cambiar el diseño por 
   clave de negocio y `_ingestion_timestamp` lo resuelven en el MERGE de Silver). Publicar a
   Couchbase agrega un sistema más que monitorear; si la latencia que piden las apps lo permite,
   una tabla Gold servida por un SQL warehouse evita esa copia.
+
+### H8. Plataforma objetivo: cómo integraría todo lo anterior sobre Databricks, con criterio de costo
+Las mejoras H1–H7 y los desacuerdos D1–D5 convergen en una misma plataforma. Resumen de cómo la
+construiría, con tres criterios: una sola base de código multi-tenant, usar lo que la plataforma
+ya resuelve antes de escribir o comprar algo, y pagar solo por el cómputo que hace trabajo.
+
+**Arquitectura y stack.**
+- *Ingesta*: Auto Loader (o Lakeflow Connect si hay conector gestionado) escribiendo Bronze como
+  streaming tables, incremental y con checkpoint, en lugar del batch del archivo completo.
+- *Transformación*: un único pipeline declarativo (Lakeflow Declarative Pipelines) parametrizado
+  por tenant, que reutiliza las funciones puras de este repo. Las expectations reemplazan los
+  checks propios (warning → `expect`, cuarentena → `expect_or_drop` más tabla de cuarentena,
+  critical → `expect_or_fail`) y AUTO CDC reemplaza el MERGE SCD2 escrito a mano.
+- *Gobierno*: catálogo por tenant y ambiente (`saas_<env>_<tenant>`) más un catálogo `shared`
+  para el dato maestro y las vistas cross-tenant; grants por grupo, tags, row filters y linaje en
+  Unity Catalog; Terraform crea cada catálogo desde el mismo YAML del tenant.
+- *Orquestación*: Lakeflow Jobs con `for_each` sobre los tenants, reintentos y notificaciones; los
+  tenants chicos agrupados en un job y los grandes con job y SLA propios.
+- *Consumo*: SQL warehouse serverless, metric views como capa semántica, AI/BI Dashboards y Genie;
+  los agentes de IA (fase 2) acceden a través de funciones de UC y heredan sus permisos. Una base
+  de serving (Couchbase o Lakebase) solo cuando exista un caso de latencia demostrado.
+- *Despliegue*: Asset Bundles con targets dev/qa/main, desplegados desde GitHub Actions con OIDC;
+  pruebas unitarias en local (como hoy) e integración contra `qa`.
+
+**Metodología.** Tenant como configuración y alta por GitOps (YAML + `terraform apply` + corrida
+en `qa`); una tabla de control en UC para parámetros operativos que cambian seguido; productos de
+datos con dueño y SLO de frescura; contratos de datos por fuente validados en CI; ADRs para toda
+desviación de la arquitectura (como este archivo); revisión mensual de costos con las system
+tables.
+
+**Costo y recursos.** Serverless para jobs, pipelines y SQL (sin clusters encendidos); batch
+programado según la frescura que el negocio paga, streaming solo con un caso real; Liquid
+Clustering y Predictive Optimization en lugar de particiones y jobs de mantenimiento propios;
+retención explícita (VACUUM, Bronze a almacenamiento frío a los N meses); dato maestro en `shared`
+en vez de N copias; tags `tenant`/`producto`/`ambiente` y `system.billing` para ver el costo por
+tenant desde el primer día. Para el volumen de esta prueba, un job diario serverless y un warehouse
+pequeño con auto-stop cuestan decenas de dólares al mes por tenant; lo que dispara el gasto es
+cómputo ocioso, streaming innecesario y copias de datos.
+
+**Hoja de ruta.** H1 (0–3 meses): bundle, job `for_each` ejecutando el paquete actual como wheel,
+catálogo por tenant, tags y serverless, sin reescribir nada. H2 (3–9 meses): pipeline declarativo,
+Auto Loader, expectations, AUTO CDC, `dim_*` a `shared`, Monitoring y contratos. H3 (9+ meses):
+capa semántica, Genie y agentes; serving operacional solo si hace falta.
+
+**Trade-offs.** El pipeline declarativo ata el código a Databricks (el paquete actual es portable);
+se mitiga manteniendo las reglas de negocio como funciones puras, que son las que tienen valor.
+Un catálogo por tenant multiplica objetos que gobernar; se compensa con Terraform generándolos
+desde el YAML. Serverless simplifica la operación pero conviene medir el costo por DBU frente a
+job clusters en los tenants grandes.
