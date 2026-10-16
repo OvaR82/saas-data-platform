@@ -50,12 +50,21 @@ def read_raw(spark: SparkSession, path: str) -> DataFrame:
     )
 
 
+def parse_process_date(col: Column) -> Column:
+    """Parse a yyyyMMdd string to a date; returns null (never fails) for invalid values.
+
+    try_to_timestamp keeps this safe under ANSI mode (the default on Databricks serverless),
+    where to_date would raise an error on the first invalid value instead of returning null.
+    """
+    return F.to_date(F.try_to_timestamp(col, F.lit("yyyyMMdd")))
+
+
 def is_valid_process_date(col: Column) -> Column:
     """Return a boolean column: true only for real calendar dates in yyyyMMdd.
 
     Rejects null, '2025-03-15' (ISO format) and impossible dates such as '20250230'.
     """
-    parsed = F.to_date(col, "yyyyMMdd")
+    parsed = parse_process_date(col)
     # Exactly 8 digits AND a round trip that gives back the same text (so 20250230 fails).
     is_valid = col.rlike(r"^\d{8}$") & (F.date_format(parsed, "yyyyMMdd") == col)
     # A null input yields null; treat it as invalid.

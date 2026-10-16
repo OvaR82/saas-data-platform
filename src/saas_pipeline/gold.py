@@ -60,7 +60,9 @@ def build_top_materials(fact: DataFrame, top_n: int) -> DataFrame:
     month = Window.partitionBy("tenant_id", "month_start")
     return (
         monthly.withColumn(
-            "revenue_share", F.round(F.col("total_revenue") / F.sum("total_revenue").over(month), 4)
+            # try_divide: a month with zero revenue gives null instead of failing under ANSI.
+            "revenue_share",
+            F.round(F.try_divide(F.col("total_revenue"), F.sum("total_revenue").over(month)), 4),
         )
         .withColumn(
             "revenue_rank",

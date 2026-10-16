@@ -65,6 +65,24 @@ def fact_row(
     )
 
 
+def test_cast_types_turns_garbage_into_nulls_under_ansi(spark):
+    """Unparseable Bronze strings become nulls (later quarantined) instead of failing the job.
+
+    The test session runs with ANSI mode on, where a plain cast would raise an error.
+    """
+    columns = (
+        "_tenant_id string, fecha_proceso string, transporte string, ruta string, "
+        "tipo_entrega string, material string, precio string, cantidad string, unidad string, "
+        "_source_file string, _ingestion_timestamp timestamp, _batch_id string"
+    )
+    rows = [("sv", "20250314", "x12", "", "ZPRE", "AA004003", "abc", "1,5", "cs", "f", None, "b")]
+    out = silver.cast_types(spark.createDataFrame(rows, columns)).first()
+
+    assert (out.transporte, out.ruta, out.precio, out.cantidad) == (None, None, None, None)
+    assert out.fecha_proceso_date == date(2025, 3, 14)
+    assert out.unidad == "CS"
+
+
 def test_normalize_units_converts_cases_to_units(spark):
     """CS quantities are multiplied by 20; ST quantities are unchanged."""
     # 2 CS -> 40 ST; 2 ST stay 2.

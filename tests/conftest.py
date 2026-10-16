@@ -14,7 +14,11 @@ CONFIG_DIR = REPO_ROOT / "config"
 @pytest.fixture(scope="session")
 def spark():
     """A single SparkSession for the whole test run: starting the JVM is the slow part."""
-    return get_spark("saas-pipeline-tests")
+    session = get_spark("saas-pipeline-tests")
+    # Tests run in ANSI mode, the stricter default of Databricks serverless: invalid casts and
+    # dates raise errors there, so the code must stay safe in both modes.
+    session.conf.set("spark.sql.ansi.enabled", "true")
+    return session
 
 
 @pytest.fixture

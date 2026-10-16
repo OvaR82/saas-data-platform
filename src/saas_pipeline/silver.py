@@ -66,23 +66,28 @@ def prepare_dim_materials(catalog: DataFrame) -> DataFrame:
 # --- fact_deliveries -------------------------------------------------------------------------
 
 
+def _try_cast(column: str, sql_type: str) -> Column:
+    """Cast that returns null for unparseable values instead of failing under ANSI mode."""
+    return F.expr(f"try_cast({column} AS {sql_type})").alias(column)
+
+
 def cast_types(df: DataFrame) -> DataFrame:
     """Convert Bronze strings to business types and keep the lineage columns.
 
     fecha_proceso stays as yyyymmdd (partition key); fecha_proceso_date is added as date.
     """
     return df.select(
-        # Business columns. A value that cannot be cast becomes null and the quarantine
-        # rules catch it (null_cantidad, null_precio, null_business_key).
+        # Business columns. A value that cannot be cast becomes null (also under ANSI mode)
+        # and the quarantine rules catch it (null_cantidad, null_precio, null_business_key).
         F.col("_tenant_id").alias("tenant_id"),
         "fecha_proceso",
-        F.to_date("fecha_proceso", "yyyyMMdd").alias("fecha_proceso_date"),
-        F.col("transporte").cast("long").alias("transporte"),
-        F.col("ruta").cast("long").alias("ruta"),
+        bronze.parse_process_date(F.col("fecha_proceso")).alias("fecha_proceso_date"),
+        _try_cast("transporte", "BIGINT"),
+        _try_cast("ruta", "BIGINT"),
         F.trim("tipo_entrega").alias("tipo_entrega"),
         F.trim("material").alias("material"),
-        F.col("precio").cast(DECIMAL).alias("precio"),
-        F.col("cantidad").cast(DECIMAL).alias("cantidad"),
+        _try_cast("precio", "DECIMAL(38,18)"),
+        _try_cast("cantidad", "DECIMAL(38,18)"),
         F.upper(F.trim("unidad")).alias("unidad"),
         # Technical columns carried over from Bronze for lineage.
         "_source_file",
