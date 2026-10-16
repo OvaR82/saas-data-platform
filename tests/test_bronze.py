@@ -4,6 +4,7 @@ from pyspark.sql import functions as F
 
 from saas_pipeline import bronze
 from saas_pipeline.config import table_path
+from saas_pipeline.storage import TableRef, read_table
 
 
 def test_process_date_validation_rejects_null_iso_and_impossible_dates(spark):
@@ -68,3 +69,16 @@ def test_bronze_range_rerun_only_touches_that_range(spark, make_cfg):
     }
     assert {b for m, b in batches if m == "202503"} == {"march"}
     assert {b for m, b in batches if m != "202503"} == {"full"}
+
+
+def test_materials_catalog_lands_in_bronze_as_a_snapshot(spark, make_cfg):
+    """The catalog goes RAW -> Bronze (strings + technical columns); each run replaces it."""
+    cfg = make_cfg()
+    bronze.run_materials(spark, cfg, "batch-1")
+    count = bronze.run_materials(spark, cfg, "batch-2")
+    stored = read_table(spark, TableRef(path=table_path(cfg, "bronze", bronze.MATERIALS_TABLE)))
+
+    assert count == stored.count() == 35  # every catalog version, once
+    assert {r._batch_id for r in stored.select("_batch_id").distinct().collect()} == {"batch-2"}
+    assert dict(stored.dtypes)["valid_from"] == "string"  # typing belongs to Silver
+    assert stored.first()._source_file.endswith("materials_catalog.csv")

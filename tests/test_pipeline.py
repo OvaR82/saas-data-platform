@@ -31,11 +31,15 @@ def test_full_run_is_idempotent_and_logs_quality(spark, make_cfg):
 
     assert _counts(spark, cfg) == first
     assert first["dim"] == 35  # every catalog version, history included
+    # dim_materials is built from Bronze (5.1) and keeps the lineage of the catalog file.
+    dim = spark.read.format("delta").load(table_path(cfg, "silver", silver.DIM_TABLE))
+    assert dim.first()._source_file.endswith("materials_catalog.csv")
 
     # quality_logs is append-only: look only at the second run.
     run2 = spark.read.format("delta").load(cfg.paths.quality_logs).filter("_run_id = 'run2'")
     assert run2.filter("check_severity = 'critical' AND NOT check_passed").count() == 0
     assert run2.filter("check_name = 'row_reconciliation'").first().check_passed
+    assert run2.filter("check_name = 'gold_reconciles_with_silver'").first().check_passed
 
 
 def test_fail_on_critical_stops_before_gold(spark, make_cfg, monkeypatch):

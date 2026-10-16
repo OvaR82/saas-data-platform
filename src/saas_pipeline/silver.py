@@ -1,5 +1,8 @@
 """Silver: materials catalog as SCD Type 2 (dim) and clean, enriched deliveries (fact).
 
+Both tables are built only from Bronze (architecture 5.1): the catalog from bronze.materials and
+the deliveries from bronze.deliveries.
+
 Flow for fact_deliveries (counts reconcile: read = duplicates + discarded + quarantined + written):
     bronze range -> drop exact duplicates -> discard out-of-scope tipo_entrega
     -> type columns -> normalize units -> flags -> temporal join with dim_materials
@@ -17,8 +20,13 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import DecimalType
 
 from saas_pipeline import bronze
-from saas_pipeline.config import quarantine_path, table_path, to_partition_value
-from saas_pipeline.storage import date_range_predicate, merge_into, overwrite_date_range
+from saas_pipeline.config import quarantine_ref, table_ref, to_partition_value
+from saas_pipeline.storage import (
+    date_range_predicate,
+    merge_into,
+    overwrite_date_range,
+    read_table,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,23 +40,26 @@ VALID_UNITS = ("CS", "ST")
 # Business keys used by the MERGE statements (architecture 5.5).
 FACT_KEY = ("tenant_id", "fecha_proceso", "transporte", "ruta", "material", "tipo_entrega")
 DIM_KEY = ("material", "valid_from")
-# Explicit schema with enforceSchema=False: a renamed or reordered column fails the read.
-CATALOG_SCHEMA = (
-    "material string, descripcion string, categoria string, precio_base decimal(38,18), "
-    "valid_from date, valid_to date, is_current boolean"
-)
 
 
 # --- dim_materials (SCD Type 2) --------------------------------------------------------------
 
 
-def read_catalog(spark: SparkSession, path: str) -> DataFrame:
-    """Read the materials catalog CSV already typed (dates, decimal price, boolean flag)."""
-    return (
-        spark.read.option("header", True)
-        .option("enforceSchema", False)
-        .schema(CATALOG_SCHEMA)
-        .csv(path)
+def cast_catalog(df: DataFrame) -> DataFrame:
+    """Type the Bronze catalog snapshot (strings) and keep its lineage columns.
+
+    try_cast keeps it safe under ANSI mode: an unparseable value becomes null.
+    """
+    return df.select(
+        F.trim("material").alias("material"),
+        "descripcion",
+        "categoria",
+        _try_cast("precio_base", "DECIMAL(38,18)"),
+        _try_cast("valid_from", "DATE"),
+        _try_cast("valid_to", "DATE"),
+        _try_cast("is_current", "BOOLEAN"),
+        "_source_file",
+        "_ingestion_timestamp",
     )
 
 
@@ -212,26 +223,26 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     tenant = cfg.tenant.code
     start = to_partition_value(cfg.execution.start_date)
     end = to_partition_value(cfg.execution.end_date)
-    dim_path = table_path(cfg, "silver", DIM_TABLE)
-    fact_path = table_path(cfg, "silver", FACT_TABLE)
+    dim_ref = table_ref(cfg, "silver", DIM_TABLE)
+    fact_ref = table_ref(cfg, "silver", FACT_TABLE)
 
-    # dim_materials: MERGE on (material, valid_from); history is never deleted.
-    catalog = prepare_dim_materials(read_catalog(spark, f"{cfg.paths.raw}/{cfg.sources.materials}"))
+    # dim_materials: from the Bronze catalog snapshot, MERGE on (material, valid_from);
+    # history is never deleted.
+    snapshot = read_table(spark, table_ref(cfg, "bronze", bronze.MATERIALS_TABLE))
+    catalog = prepare_dim_materials(cast_catalog(snapshot))
     merge_into(
         spark,
         catalog.withColumn("_batch_id", F.lit(batch_id)).withColumn(
             "_updated_at", F.current_timestamp()
         ),
-        dim_path,
+        dim_ref,
         DIM_KEY,
     )
-    dim = spark.read.format("delta").load(dim_path)
+    dim = read_table(spark, dim_ref)
 
     # fact_deliveries: Silver only reads Bronze (never RAW), for the processed range.
-    deliveries = (
-        spark.read.format("delta")
-        .load(table_path(cfg, "bronze", bronze.TABLE))
-        .filter(F.col("fecha_proceso").between(start, end))
+    deliveries = read_table(spark, table_ref(cfg, "bronze", bronze.TABLE)).filter(
+        F.col("fecha_proceso").between(start, end)
     )
     # Exact duplicates (all source columns equal) keep a single copy; not an anomaly (5.6).
     deduplicated = deliveries.dropDuplicates(list(bronze.SOURCE_COLUMNS))
@@ -247,13 +258,13 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
     merge_into(
         spark,
         valid,
-        fact_path,
+        fact_ref,
         FACT_KEY,
         partition_by="fecha_proceso",
         scope=date_range_predicate(start, end, alias="t"),
     )
     # Quarantined rows: replaced for the same range, so reprocessing never duplicates them.
-    overwrite_date_range(quarantine, quarantine_path(cfg, "silver", FACT_TABLE), start, end)
+    overwrite_date_range(quarantine, quarantine_ref(cfg, "silver", FACT_TABLE), start, end)
 
     # Reconciliation counts: read = duplicates + discarded + quarantined + written.
     read, unique, kept = deliveries.count(), deduplicated.count(), in_scope.count()

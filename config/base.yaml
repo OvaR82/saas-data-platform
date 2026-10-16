@@ -13,6 +13,12 @@ paths:
   quarantine_root: ${paths.root}
   quality_logs: ${paths.root}/shared/quality_logs
 
+storage:
+  # path: Delta tables by path, with the layout of architecture 5.2 (this test).
+  # catalog: Unity Catalog names <catalog>.<layer>_<tenant>.<table> (Databricks).
+  mode: path
+  catalog: saas_${env}
+
 sources:
   deliveries: global_mobility_data_entrega_productos.csv
   materials: materials_catalog.csv

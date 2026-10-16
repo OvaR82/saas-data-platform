@@ -1,10 +1,12 @@
 """Quality checks: SCD2 invariants, reconciliation, thresholds, persistence and the gate."""
 
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
 from saas_pipeline import quality
+from saas_pipeline.storage import TableRef
 
 DIM_COLUMNS = "material string, valid_from date, valid_to date, is_current boolean"
 # Counts that reconcile: 2 + 8 + 5 + 85 = 100.
@@ -43,6 +45,40 @@ def test_gap_check_detects_dates_without_a_version(spark):
     assert (gaps.records_failed, gaps.check_passed, gaps.severity) == (1, False, "warning")
 
 
+def test_gold_check_detects_wrong_missing_and_extra_groups(spark):
+    """Gold must match an independent aggregation of Silver, group by group."""
+    fact = spark.createDataFrame(
+        [
+            ("20250301", "ZPRE", Decimal(10), Decimal(2)),
+            ("20250301", "ZPRE", Decimal(5), Decimal(2)),  # ZPRE: 15 units, revenue 30
+            ("20250301", "Z04", Decimal(1), Decimal(3)),  # Z04: 1 unit, revenue 3
+        ],
+        "fecha_proceso string, tipo_entrega string, cantidad_normalizada_st decimal(38,18), "
+        "precio decimal(38,18)",
+    )
+    gold_columns = (
+        "fecha_proceso string, tipo_entrega string, total_units decimal(38,18), "
+        "total_revenue decimal(38,6)"
+    )
+    good = spark.createDataFrame(
+        [
+            ("20250301", "ZPRE", Decimal(15), Decimal(30)),
+            ("20250301", "Z04", Decimal(1), Decimal(3)),
+        ],
+        gold_columns,
+    )
+    bad = spark.createDataFrame(
+        [
+            ("20250301", "ZPRE", Decimal(14), Decimal(30)),  # wrong units
+            ("20250301", "Z05", Decimal(1), Decimal(1)),  # extra group; Z04 is missing
+        ],
+        gold_columns,
+    )
+    assert quality.check_gold_reconciles_with_silver(fact, good).check_passed
+    result = quality.check_gold_reconciles_with_silver(fact, bad)
+    assert (result.records_failed, result.layer, result.severity) == (3, "gold", "critical")
+
+
 def test_reconciliation_detects_lost_rows():
     """Reconciliation fails when read rows are not fully accounted for."""
     assert quality.check_reconciliation(METRICS).check_passed
@@ -65,7 +101,7 @@ def test_quality_logs_follow_the_architecture_schema(spark, tmp_path):
         quality.check_reconciliation(METRICS),
         quality.check_discarded_delivery_types(METRICS),
     ]
-    quality.write_quality_logs(spark, results, path, "run1", "run1_sv", "sv")
+    quality.write_quality_logs(spark, results, TableRef(path=path), "run1", "run1_sv", "sv")
 
     # Exact column names and order of architecture 5.9.
     logs = spark.read.format("delta").load(path)

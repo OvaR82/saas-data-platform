@@ -12,8 +12,12 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
+from saas_pipeline.storage import TableRef
+
 # Supported environments; each one has its overrides in config/env/<env>.yaml.
 ENVIRONMENTS = ("dev", "qa", "main")
+# path: Delta tables by path (layout of architecture 5.2); catalog: Unity Catalog table names.
+STORAGE_MODES = ("path", "catalog")
 # Overridable so the package can run from another working directory (e.g. a Databricks job).
 DEFAULT_CONFIG_DIR = Path(os.environ.get("SAAS_CONFIG_DIR", "config"))
 
@@ -88,6 +92,9 @@ def _validate(cfg: DictConfig, tenant: str) -> None:
         raise ConfigError(f"Dates must use YYYY-MM-DD: {exc}") from exc
     if start > end:
         raise ConfigError(f"start_date {start} is after end_date {end}")
+    # Tables are addressed either by path (this test) or by Unity Catalog name (Databricks).
+    if cfg.storage.mode not in STORAGE_MODES:
+        raise ConfigError(f"storage.mode must be one of {STORAGE_MODES}, got '{cfg.storage.mode}'")
 
 
 def to_partition_value(iso_date: str) -> str:
@@ -109,3 +116,27 @@ def quarantine_path(cfg: DictConfig, layer: str, table: str) -> str:
     Layout: <quarantine_root>/<layer>_quarantine/<tenant>/<table>.
     """
     return f"{cfg.paths.quarantine_root}/{layer}_quarantine/{cfg.tenant.code}/{table}"
+
+
+# Logical names follow architecture 5.2 / 5.6 / 5.9: the same names in both modes.
+
+
+def table_ref(cfg: DictConfig, layer: str, table: str) -> TableRef:
+    """A tenant table: <paths.layer>/<tenant>/<table> or <catalog>.<layer>_<tenant>.<table>."""
+    if cfg.storage.mode == "catalog":
+        return TableRef(name=f"{cfg.storage.catalog}.{layer}_{cfg.tenant.code}.{table}")
+    return TableRef(path=table_path(cfg, layer, table))
+
+
+def quarantine_ref(cfg: DictConfig, layer: str, table: str) -> TableRef:
+    """A quarantine table: the quarantine path or <catalog>.<layer>_quarantine_<tenant>.<table>."""
+    if cfg.storage.mode == "catalog":
+        return TableRef(name=f"{cfg.storage.catalog}.{layer}_quarantine_{cfg.tenant.code}.{table}")
+    return TableRef(path=quarantine_path(cfg, layer, table))
+
+
+def quality_logs_ref(cfg: DictConfig) -> TableRef:
+    """The shared quality_logs table: paths.quality_logs or <catalog>.shared.quality_logs."""
+    if cfg.storage.mode == "catalog":
+        return TableRef(name=f"{cfg.storage.catalog}.shared.quality_logs")
+    return TableRef(path=cfg.paths.quality_logs)

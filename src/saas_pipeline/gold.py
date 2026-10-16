@@ -16,8 +16,8 @@ from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 from saas_pipeline import silver
-from saas_pipeline.config import table_path, to_partition_value
-from saas_pipeline.storage import overwrite_date_range, overwrite_where
+from saas_pipeline.config import table_ref, to_partition_value
+from saas_pipeline.storage import overwrite_date_range, overwrite_where, read_table
 
 log = logging.getLogger(__name__)
 
@@ -84,13 +84,10 @@ def month_bounds(start: str, end: str) -> tuple[date, date]:
     return first, last
 
 
-def _read_fact(spark: SparkSession, cfg: DictConfig, start: str, end: str) -> DataFrame:
+def read_fact(spark: SparkSession, cfg: DictConfig, start: str, end: str) -> DataFrame:
     """Silver facts of the tenant in [start, end] (yyyymmdd). Gold only reads Silver."""
-    return (
-        spark.read.format("delta")
-        .load(table_path(cfg, "silver", silver.FACT_TABLE))
-        .filter(F.col("fecha_proceso").between(start, end))
-    )
+    fact = read_table(spark, table_ref(cfg, "silver", silver.FACT_TABLE))
+    return fact.filter(F.col("fecha_proceso").between(start, end))
 
 
 def _stamp(df: DataFrame, batch_id: str) -> DataFrame:
@@ -108,16 +105,16 @@ def run(spark: SparkSession, cfg: DictConfig, batch_id: str) -> dict[str, int]:
 
     # daily_metrics_by_delivery_type: exactly the processed date range.
     # ~4 rows per day and tenant: not worth physical partitions, replaceWhere works on data.
-    daily = _stamp(build_daily_metrics(_read_fact(spark, cfg, start, end)), batch_id)
-    overwrite_date_range(daily, table_path(cfg, "gold", TABLE), start, end, partitioned=False)
+    daily = _stamp(build_daily_metrics(read_fact(spark, cfg, start, end)), batch_id)
+    overwrite_date_range(daily, table_ref(cfg, "gold", TABLE), start, end, partitioned=False)
 
     # top_materials_by_month: the range widened to whole months, replaced month by month.
     first, last = month_bounds(start, end)
-    month_fact = _read_fact(spark, cfg, first.strftime("%Y%m%d"), last.strftime("%Y%m%d"))
+    month_fact = read_fact(spark, cfg, first.strftime("%Y%m%d"), last.strftime("%Y%m%d"))
     top = _stamp(build_top_materials(month_fact, cfg.gold.top_materials_n), batch_id)
     overwrite_where(
         top,
-        table_path(cfg, "gold", TOP_TABLE),
+        table_ref(cfg, "gold", TOP_TABLE),
         f"month_start BETWEEN DATE'{first}' AND DATE'{last.replace(day=1)}'",
     )
 

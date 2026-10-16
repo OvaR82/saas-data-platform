@@ -28,7 +28,7 @@ from saas_pipeline.bronze import is_valid_process_date
 from saas_pipeline.config import ENVIRONMENTS, load_config, to_partition_value
 from saas_pipeline.session import get_spark
 from saas_pipeline.silver import normalize_code, normalize_units
-from saas_pipeline.storage import overwrite_date_range
+from saas_pipeline.storage import TableRef, overwrite_date_range
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def run(spark: SparkSession, cfg: DictConfig) -> dict[str, int]:
     )
 
     # Delta + replaceWhere: re-running the same range replaces it, other dates are untouched.
-    overwrite_date_range(in_range, output_path, start, end)
+    overwrite_date_range(in_range, TableRef(path=output_path), start, end)
 
     # Rejected rows are not published, but they are visible: counted by reason in the log.
     for row in rejected.groupBy("reject_reason").count().collect():

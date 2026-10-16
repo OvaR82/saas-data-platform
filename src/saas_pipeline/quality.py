@@ -13,6 +13,7 @@ from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 from saas_pipeline.silver import FACT_KEY
+from saas_pipeline.storage import TableRef, append_table
 
 log = logging.getLogger(__name__)
 
@@ -187,13 +188,49 @@ def run_silver_checks(
     ]
 
 
+# --- Gold checks ---------------------------------------------------------------------------
+
+
+def check_gold_reconciles_with_silver(fact: DataFrame, daily: DataFrame) -> CheckResult:
+    """Compare Gold daily metrics with an independent aggregation of Silver (critical).
+
+    Every (fecha_proceso, tipo_entrega) must exist on both sides with the same units and
+    revenue: catches lost, duplicated or wrongly aggregated groups. The expected values are
+    computed here, not with gold.build_daily_metrics, so the check is not circular.
+    """
+    keys = ["fecha_proceso", "tipo_entrega"]
+    expected = fact.groupBy(*keys).agg(
+        F.sum("cantidad_normalizada_st").alias("_units"),
+        F.sum(F.col("cantidad_normalizada_st") * F.col("precio")).alias("_revenue"),
+    )
+    published = daily.select(
+        *keys,
+        F.col("total_units").alias("_gold_units"),
+        F.col("total_revenue").alias("_gold_revenue"),
+    )
+    # Full outer join: a group missing on either side is a mismatch too.
+    joined = expected.join(published, keys, "full_outer")
+    matches = F.col("_units").eqNullSafe(F.col("_gold_units")) & F.col("_revenue").eqNullSafe(
+        F.col("_gold_revenue")
+    )
+    failed = joined.filter(~matches).count()
+    return _result(
+        "gold",
+        "daily_metrics_by_delivery_type",
+        "gold_reconciles_with_silver",
+        CRITICAL,
+        joined.count(),
+        failed,
+    )
+
+
 # --- persistence and enforcement -----------------------------------------------------------
 
 
 def write_quality_logs(
     spark: SparkSession,
     results: list[CheckResult],
-    path: str,
+    ref: TableRef,
     run_id: str,
     batch_id: str,
     tenant: str,
@@ -223,7 +260,7 @@ def write_quality_logs(
     logs = spark.createDataFrame(rows, QUALITY_LOG_COLUMNS).withColumn(
         "executed_at", F.current_timestamp()
     )
-    logs.write.format("delta").mode("append").save(path)
+    append_table(logs, ref)
 
 
 def enforce(results: list[CheckResult], tenant: str, fail_on_critical: bool) -> None:
