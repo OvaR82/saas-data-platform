@@ -7,7 +7,7 @@ sin dejarla registrada aquí.
 
 | Tipo | Entradas | Qué contiene |
 |---|---|---|
-| Ambigüedades resueltas | A1–A12 | Huecos del enunciado y cómo se resolvieron en el código |
+| Ambigüedades resueltas | A1–A13 | Huecos del enunciado y cómo se resolvieron en el código |
 | Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
 | Mejoras (Horizonte 2-3) | H1–H8 | Evolución tecnológica propuesta; H8 integra todas en una plataforma objetivo con criterio de costo |
 
@@ -81,6 +81,23 @@ Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver)
 - **Verificación**: `test_partial_range_recomputes_the_whole_month` reprocesa del 10 al 20 de
   marzo y comprueba que el ranking de marzo es idéntico al de la corrida completa y que los demás
   meses no se tocaron.
+
+### A13. "Material no presente en el catálogo": SKU inexistente frente a SKU sin versión vigente
+- **Arquitectura**: 5.6 manda a cuarentena el "material no presente en el catálogo" y 5.7 pide el
+  join temporal.
+- **Problema**: con el join temporal, una entrega puede quedar sin versión por dos causas
+  distintas: el SKU no existe en el catálogo, o existe pero ninguna versión cubre esa fecha (un
+  hueco entre versiones, o una entrega anterior a la primera vigencia). La corrección es
+  diferente: en el primer caso hay que revisar la transacción; en el segundo, el catálogo.
+- **Decisión**: dos motivos de cuarentena, `material_not_in_catalog` (SKU desconocido) y
+  `no_material_version_at_date` (SKU conocido, sin versión en la fecha), y un check `warning`
+  `no_version_gaps` sobre `dim_materials`, gemelo del check crítico de solapamientos. Es
+  *warning* y no *critical* porque un hueco no corrompe datos: las entregas afectadas van a
+  cuarentena con un motivo que dice qué corregir.
+- **Estado actual**: el catálogo de la prueba no tiene huecos (vigencias contiguas desde
+  2024-01-01) y las 23 entregas en cuarentena por material son SKUs inexistentes (`XX...`).
+- **Relacionado**: los códigos de negocio `tipo_entrega` y `unidad` se comparan sin espacios y en
+  mayúsculas, para que un `zpre` no se descarte como tipo fuera de alcance.
 
 ## Desacuerdos con la arquitectura (propuesta alternativa)
 

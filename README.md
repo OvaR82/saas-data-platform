@@ -104,7 +104,7 @@ final se listan los fallidos y el proceso termina con código distinto de cero.
 
 ```bash
 make lint             # ruff check + ruff format --check (PEP8, imports, bugs comunes)
-make test             # pytest: 33 pruebas, con Spark real
+make test             # pytest: 35 pruebas, con Spark real (en modo ANSI)
 make validate-config  # carga todas las combinaciones de ambiente y tenant
 make format           # corrige el formato automáticamente
 ```
@@ -283,6 +283,7 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `material_version_enriched` | Silver | critical | Toda fila encontró su versión de material en el join temporal |
 | `single_current_version` | Silver | critical | SCD2: exactamente una versión vigente por material |
 | `no_overlapping_versions` | Silver | critical | SCD2: las versiones de un material no se solapan |
+| `no_version_gaps` | Silver | warning | SCD2: no hay fechas sin versión vigente entre dos versiones de un material |
 | `row_reconciliation` | Silver | critical | Leídas = duplicados + descartadas + cuarentena + escritas |
 | `quarantine_rate` | Silver | warning | La cuarentena no supera `max_quarantine_rate` |
 | `discarded_delivery_types` | Silver | info | Cuántas filas se descartaron por tipo de entrega |
