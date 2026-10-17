@@ -41,4 +41,5 @@ infra-validate:  ## terraform fmt + validate of the snippet in docs/infra.md (ne
 	bash scripts/validate_infra_snippet.sh
 
 clean:  ## Remove generated layers under DATA_ROOT (never touches data/raw)
+	@test "$(abspath $(DATA_ROOT))" != "$(abspath .)" || { echo "DATA_ROOT is the repo root; refusing to clean"; exit 1; }
 	rm -rf $(addprefix $(DATA_ROOT)/,bronze silver gold bronze_quarantine silver_quarantine shared mentoring qa main)

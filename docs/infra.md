@@ -18,6 +18,7 @@ arquitectura provista (Unity Catalog con un schema por capa y tenant, ADLS Gen2 
 | Ambiente | Catálogo `saas_<env>` | Raíz del gobierno de datos del ambiente |
 | Ambiente | Schema `saas_<env>.shared` | `quality_logs` de todos los tenants (5.9, A14) |
 | Ambiente | Service principal del pipeline | Identidad con la que corre el job |
+| Ambiente | Grant `USE_CATALOG` sobre `saas_<env>` al service principal y a los grupos lectores | Sin él, Unity Catalog niega el acceso a cualquier schema del catálogo, aunque tenga grants propios |
 | **Tenant** | Carpetas `<área>/<tenant>/` en ADLS para 5 áreas: `bronze`, `silver`, `gold`, `bronze_quarantine`, `silver_quarantine` | Ubicación física de sus tablas |
 | **Tenant** | Un schema `<área>_<tenant>` por área (`bronze_sv`, …, `silver_quarantine_sv`) | Aislamiento lógico (5.2) y cuarentena (5.6); son los nombres que usa el pipeline con `storage.mode=catalog` |
 | **Tenant** | Grants | El grupo del tenant solo lee Gold; el pipeline escribe todas las capas |
@@ -135,14 +136,20 @@ terraform {
   del tenant lee únicamente Gold. Bronze y Silver no se exponen a consumidores.
 - **Secretos fuera del código y del estado de Terraform**: el valor de la credencial se carga en Key
   Vault por un proceso aparte; Terraform solo conecta el secret scope.
-- **Las carpetas de cuarentena se crean aunque no tengan schema propio**: mantienen el mismo layout
-  que el pipeline (`<layer>_quarantine/<tenant>/`). Si se adoptara la propuesta D3 de
-  `observations.md` (catálogo por tenant), el módulo crearía un `databricks_catalog` con su propia
-  `storage_root` en lugar de tres schemas.
+- **`USE_CATALOG` se otorga una vez, en el módulo raíz, no por tenant**: `databricks_grants` es
+  autoritativo por objeto (el último `apply` reemplaza la lista completa de grants de ese
+  objeto). Si cada instancia del módulo `tenant` otorgara `USE_CATALOG` sobre `saas_<env>`, se
+  pisarían entre sí. Por eso el módulo raíz otorga `USE_CATALOG` al service principal y a los
+  grupos lectores de todos los tenants, y el módulo `tenant` solo otorga sobre sus schemas.
+- **Las cuarentenas tienen schema y carpeta propios** (`bronze_quarantine_<tenant>`,
+  `silver_quarantine_<tenant>`), con el mismo layout que usa el pipeline
+  (`<layer>_quarantine/<tenant>/`). Si se adoptara la propuesta D3 de `observations.md`
+  (catálogo por tenant), el módulo crearía un `databricks_catalog` con su propia `storage_root`
+  en lugar de cinco schemas.
 
 ## Qué queda fuera del snippet
 
 - Backend remoto del estado (`azurerm` backend en una cuenta de almacenamiento con bloqueo).
-- Los recursos de ambiente (cuenta de almacenamiento, external location, catálogo, service
-  principal), que se crean una sola vez.
+- Los recursos de ambiente (cuenta de almacenamiento, external location, catálogo con su grant
+  `USE_CATALOG`, service principal), que se crean una sola vez.
 - El job de Databricks que ejecuta el pipeline (propuesto con Asset Bundles en la mejora H5).
