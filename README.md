@@ -25,7 +25,8 @@ Corrida completa de los 6 tenants (`make run`), semestre 2025-01-01 a 2025-06-30
 | Silver: descartadas | 188 | `tipo_entrega` COBR o Z99: se cuentan, no se guardan |
 | Silver: cuarentena | 75 | Cantidad ≤ 0 o nula, material fuera de catálogo |
 | Silver: `fact_deliveries` | 2 797 | 15 + 188 + 75 + 2 797 = 3 075: ninguna fila se pierde |
-| Gold | 688 | Una fila por tenant, día y tipo de entrega |
+| Gold: `daily_metrics_by_delivery_type` | 688 | Una fila por tenant, día y tipo de entrega |
+| Gold: `top_materials_by_month` | 180 | Top 5 materiales por revenue, por tenant y mes (6 × 6 × 5) |
 
 Todos los checks críticos pasan. Dos ejecuciones seguidas dejan exactamente los mismos conteos.
 
@@ -101,14 +102,14 @@ final se listan los fallidos y el proceso termina con código distinto de cero.
 
 ```bash
 make lint             # ruff check + ruff format --check (PEP8, imports, bugs comunes)
-make test             # pytest: 29 pruebas, con Spark real
+make test             # pytest: 33 pruebas, con Spark real
 make validate-config  # carga todas las combinaciones de ambiente y tenant
 make format           # corrige el formato automáticamente
 ```
 
 Las pruebas cubren: configuración y precedencia, validación de fechas, idempotencia de Bronze y
 reproceso por rango, conversión de unidades, flags, join temporal SCD2, cuarentena con todos sus
-motivos, métricas Gold, checks de calidad y su persistencia, la puerta `fail_on_critical`, una
+motivos, métricas Gold, ranking mensual y su reproceso por mes completo, checks de calidad y su persistencia, la puerta `fail_on_critical`, una
 corrida completa repetida y el refactor de mentoría.
 
 El mismo conjunto corre en GitHub Actions en cada push y pull request
@@ -138,7 +139,7 @@ flowchart TD
     JOIN -.->|"anomalías con motivo"| SQ["silver_quarantine"]
     FACT --> CHECKS{{"checks de calidad<br/>critical · warning · info"}}
     CHECKS -->|"se registran siempre"| QL["shared/quality_logs"]
-    CHECKS -->|"si no hay críticos fallidos<br/>(o fail_on_critical=false)"| GOLD["GOLD<br/>{tenant}/daily_metrics_by_delivery_type<br/>recálculo del rango"]
+    CHECKS -->|"si no hay críticos fallidos<br/>(o fail_on_critical=false)"| GOLD["GOLD<br/>{tenant}/daily_metrics_by_delivery_type<br/>{tenant}/top_materials_by_month<br/>recálculo del rango"]
 ```
 
 | Capa | Tabla | Escritura | Partición |
@@ -147,7 +148,25 @@ flowchart TD
 | Silver | `fact_deliveries` | `MERGE` por `(tenant_id, fecha_proceso, transporte, ruta, material, tipo_entrega)` | `fecha_proceso` |
 | Silver | `dim_materials` | `MERGE` SCD2 por `(material, valid_from)`; la historia nunca se borra | — |
 | Gold | `daily_metrics_by_delivery_type` | Recálculo del rango (`replaceWhere`) | — (ver D1) |
+| Gold | `top_materials_by_month` | Recálculo de los **meses completos** que toca el rango (`replaceWhere` por mes) | — |
 | Compartida | `quality_logs` | Append (una fila por check y corrida) | — |
+
+### Segunda tabla Gold: `top_materials_by_month` (bonus)
+
+Ranking de los materiales con más revenue por tenant y mes; se guardan los `gold.top_materials_n`
+primeros (5 por defecto, configurable por tenant).
+
+| Columna | Descripción |
+|---|---|
+| `tenant_id`, `month_start` | Tenant y primer día del mes |
+| `material`, `descripcion`, `categoria` | Material y la **última versión usada en el mes** (SCD2: puede cambiar a mitad de mes) |
+| `total_revenue`, `total_units` | Revenue (precio de la transacción) y unidades ST del mes |
+| `revenue_share` | Participación del material en el revenue total del mes del tenant |
+| `revenue_rank` | Posición (1 = mayor revenue); empates resueltos por código de material |
+
+Un ranking mensual calculado con parte de un mes sería incorrecto, así que el rango procesado se
+**amplía a meses completos**: reprocesar del 10 al 20 de marzo recalcula todo marzo (cubierto por
+`test_partial_range_recomputes_the_whole_month`).
 
 Puntos clave:
 
@@ -184,6 +203,7 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `execution.fail_fast` | `false` | Abortar `--tenant all` ante el primer fallo |
 | `quality.fail_on_critical` | `false` (`true` en `main`) | Detener el tenant antes de Gold si falla un check crítico |
 | `quality.max_quarantine_rate` | `0.05` | Umbral del warning de tasa de cuarentena |
+| `gold.top_materials_n` | `5` | Materiales por tenant y mes en `top_materials_by_month` |
 | `business.units_per_case` | `20` | Factor CS → ST |
 | `business.routine_delivery_types` / `bonus_delivery_types` | `[ZPRE, ZVE1]` / `[Z04, Z05]` | Tipos válidos; el resto se descarta |
 
@@ -267,7 +287,7 @@ memoria) de la función `run()`, la única que lee y escribe.
 
 | Fuera de alcance | Por qué | Dónde se retoma |
 |---|---|---|
-| Segunda tabla Gold | Bonus. Se priorizó que la tabla obligatoria, la calidad y la mentoría quedaran completas y probadas | — |
+| Segunda tabla Gold | **Incluido** (era bonus): `top_materials_by_month`, top N materiales por revenue por tenant y mes | Ver "Segunda tabla Gold" |
 | Ingesta con Auto Loader / streaming | Bonus. El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
 | Dashboard | Bonus. El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
 | Terraform funcional (`plan` contra una cuenta real) | Bonus. Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |

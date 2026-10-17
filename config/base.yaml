@@ -27,6 +27,9 @@ quality:
   fail_on_critical: false
   max_quarantine_rate: 0.05  # warning above 5% of the rows read in Silver
 
+gold:
+  top_materials_n: 5  # materials kept per tenant and month in top_materials_by_month
+
 business:
   units_per_case: 20
   routine_delivery_types: [ZPRE, ZVE1]

@@ -34,6 +34,14 @@ def overwrite_date_range(
     writer.save(path)
 
 
+def overwrite_where(df: DataFrame, path: str, predicate: str) -> None:
+    """Write `df` replacing only the target rows that match `predicate` (any column).
+
+    Used when the replaced range is not a fecha_proceso range, e.g. whole months.
+    """
+    df.write.format("delta").mode("overwrite").option("replaceWhere", predicate).save(path)
+
+
 def overwrite_table(df: DataFrame, path: str) -> None:
     """Replace the whole table; for small tables that are always rebuilt as a whole."""
     df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
