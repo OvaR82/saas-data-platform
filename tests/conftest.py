@@ -12,9 +12,15 @@ CONFIG_DIR = REPO_ROOT / "config"
 
 
 @pytest.fixture(scope="session")
-def spark():
+def spark(tmp_path_factory):
     """A single SparkSession for the whole test run: starting the JVM is the slow part."""
-    return get_spark("saas-pipeline-tests")
+    # Catalog-mode tests create managed tables: keep them in a temp warehouse, not the repo.
+    warehouse = tmp_path_factory.mktemp("spark-warehouse").as_posix()
+    session = get_spark("saas-pipeline-tests", warehouse_dir=warehouse)
+    # Tests run in ANSI mode, the stricter default of Databricks serverless: invalid casts and
+    # dates raise errors there, so the code must stay safe in both modes.
+    session.conf.set("spark.sql.ansi.enabled", "true")
+    return session
 
 
 @pytest.fixture

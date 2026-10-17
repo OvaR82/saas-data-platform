@@ -6,7 +6,7 @@ calcula el total y lo escribe en Parquet. El refactor está en
 [`good_code.py`](good_code.py) y sus pruebas en [`tests/test_mentoring.py`](../tests/test_mentoring.py).
 
 Las líneas citadas corresponden a `bad_code.py`. Las afirmaciones marcadas con 🔎 se verificaron
-ejecutando la lógica original sobre el dataset real de la prueba.
+ejecutando la lógica original sobre el dataset real de la prueba (pandas 2.2 y PySpark 3.5).
 
 ## Lo que está bien
 
@@ -24,7 +24,7 @@ Es una buena base: los problemas están en **cómo** se ejecuta, no en **qué** 
 | 1 | Publica datos incorrectos sin avisar | Alta | 11–22 |
 | 2 | Procesa en pandas, fila por fila, en una sola máquina | Alta | 7, 10, 23–24 |
 | 3 | Se rompe con un país sin datos y no maneja errores | Alta | 8, 24, 26 |
-| 4 | Escritura frágil: no atómica, sin alcance y en `/tmp` | Alta | 25 |
+| 4 | Escritura no idempotente ni atómica, y en `/tmp` | Alta | 25 |
 | 5 | Reglas de negocio y rutas escritas en el código | Media | 11, 13, 25, 29 |
 | 6 | Ejecuta trabajo al importar el módulo | Media | 4, 29 |
 | 7 | Tipos inferidos y `float` para dinero | Media | 7 |
@@ -32,11 +32,25 @@ Es una buena base: los problemas están en **cómo** se ejecuta, no en **qué** 
 | 9 | Legibilidad: nombres, `print`, sin tipos ni docstrings | Baja | 6, 10, 16–22, 26–27 |
 | 10 | Sin pruebas | Media | — |
 
+**Cobertura de las áreas de mejora que plantea la consigna:**
+
+| Área | Observaciones |
+|---|---|
+| Uso de pandas donde corresponde Spark nativo | 2 |
+| Iteración fila por fila | 2 |
+| Lógica de negocio hardcodeada | 5 |
+| Ausencia de validaciones y tipado | 1, 7, 9 |
+| Naming inconsistente | 9 |
+| Manejo de errores inexistente | 3 |
+| Escritura no idempotente | 4 |
+| Ausencia de tests | 10 |
+| Falta de soporte multi-tenant | 8 |
+
 ---
 
 ## 1. Publica datos incorrectos sin avisar — **Alta**
 
-**Qué está mal.** Ninguna fila se valida antes de calcular:
+**Qué está mal aplicado.** Ninguna fila se valida antes de calcular:
 - Cualquier `unidad` distinta de `CS` se trata como `ST` (líneas 14–15): una unidad desconocida
   (`KG`, `PK`, vacía) se suma como si fueran unidades sueltas.
 - Cantidades negativas, en cero o nulas, precios nulos y fechas nulas o inválidas se publican tal
@@ -56,11 +70,12 @@ qty = F.when(F.col("unidad") == "CS", F.col("cantidad") * units_per_case) \
        .when(F.col("unidad") == "ST", F.col("cantidad"))   # cualquier otra unidad -> null -> rechazo
 ```
 
-En `good_code.py`: `routine_deliveries()` devuelve `(valid, rejected)` con `reject_reason`.
+En `good_code.py`: `routine_deliveries()` devuelve `(valid, rejected)`; cada fila rechazada lleva
+su `reject_reason` y el script registra cuántas hubo de cada motivo.
 
 ## 2. Procesa en pandas, fila por fila, en una sola máquina — **Alta**
 
-**Qué está mal.** `pd.read_csv` (línea 7) carga todo el archivo en la memoria de un solo proceso,
+**Qué está mal aplicado.** `pd.read_csv` (línea 7) carga todo el archivo en la memoria de un solo proceso,
 `iterrows()` (línea 10) recorre fila por fila en Python, y al final (líneas 23–24) se copia todo
 a Spark solo para escribir.
 
@@ -74,7 +89,7 @@ pasa por un bucle de Python.
 
 ## 3. Se rompe con un país sin datos y no maneja errores — **Alta**
 
-**Qué está mal.** Si el filtro de la línea 8 no deja filas, `pd.DataFrame([])` queda sin columnas
+**Qué está mal aplicado.** Si el filtro de la línea 8 no deja filas, `pd.DataFrame([])` queda sin columnas
 y `spark.createDataFrame` (línea 24) falla. No hay ningún manejo de errores y el resultado se
 anuncia con `print("done")` (línea 26).
 
@@ -86,20 +101,24 @@ haría fallar el job completo con un error que no explica la causa.
 filas), registrar el resultado con `logging` y devolver un código de salida distinto de cero cuando
 algo falla, para que el orquestador lo detecte.
 
-## 4. Escritura frágil: no atómica, sin alcance y en `/tmp` — **Alta**
+## 4. Escritura no idempotente ni atómica, y en `/tmp` — **Alta**
 
-**Qué está mal.** `write.mode("overwrite").parquet("/tmp/output/" + country)` (línea 25).
+**Qué está mal aplicado.** `write.mode("overwrite").parquet("/tmp/output/" + country)` (línea 25).
 
 **Por qué importa.**
+- **No es idempotente de forma confiable:** reejecutar con la misma entrada da el mismo resultado
+  solo si nada falla durante la escritura; y como el destino es todo el país, no hay forma de
+  reprocesar un día o un rango sin reescribir toda su historia. Una escritura idempotente
+  reemplaza exactamente lo que se reprocesa, la ejecute una o diez veces.
 - **No es atómica:** Parquet en modo `overwrite` borra la carpeta y luego escribe. Si el proceso se
   cae en el medio, el país queda sin datos o con datos a medias, y un lector concurrente puede ver
   la carpeta vacía.
-- **Sin alcance:** cada ejecución reescribe toda la historia del país. No hay forma de reprocesar
-  un solo día sin recalcular todo.
 - **`/tmp` es efímero:** se borra al reiniciar la máquina o el cluster.
 
-**Cómo se corrige.** Escribir en **Delta Lake** (transaccional: o se escribe todo o nada) y
-reemplazar solo el rango procesado:
+**Cómo se corrige.** Escribir en **Delta Lake**, que es transaccional: o se escribe todo o nada,
+y un lector nunca ve la tabla a medias. Como este script recalcula el tenant completo, basta un
+`overwrite` atómico (es lo que hace `good_code.py`): correrlo dos veces da el mismo resultado.
+Cuando se procesa por rango de fechas, se reemplaza solo ese rango, como hace el pipeline:
 
 ```python
 df.write.format("delta").mode("overwrite") \
@@ -109,18 +128,21 @@ df.write.format("delta").mode("overwrite") \
 
 ## 5. Reglas de negocio y rutas escritas en el código — **Media**
 
-**Qué está mal.** Los tipos `"ZPRE"`/`"ZVE1"` (línea 11), el factor `20` (línea 13), la ruta
+**Qué está mal aplicado.** Los tipos `"ZPRE"`/`"ZVE1"` (línea 11), el factor `20` (línea 13), la ruta
 `/tmp/output/` (línea 25) y la llamada con `"data.csv"`, `"GT"` (línea 29).
 
 **Por qué importa.** Cambiar el tipo de entrega, el factor de un país o el ambiente obliga a
 modificar y redesplegar código. Es fácil que dos scripts terminen con reglas distintas.
 
-**Cómo se corrige.** Leerlos desde la configuración del proyecto (`business.routine_delivery_types`,
-`business.units_per_case`, `paths.*`), que además cambia por ambiente y por tenant.
+**Cómo se corrige.** Como primer paso, constantes con nombre al inicio del archivo
+(`ROUTINE_TYPES`, `UNITS_PER_CASE`) y rutas y tenant por argumento: es lo que hace `good_code.py`.
+En el pipeline, esos valores salen de la configuración del proyecto
+(`business.routine_delivery_types`, `business.units_per_case`, `paths.*`), que además cambia por
+ambiente y por tenant.
 
 ## 6. Ejecuta trabajo al importar el módulo — **Media**
 
-**Qué está mal.** La `SparkSession` se crea a nivel de módulo (línea 4) y `process(...)` se llama
+**Qué está mal aplicado.** La `SparkSession` se crea a nivel de módulo (línea 4) y `process(...)` se llama
 al final del archivo (línea 29), fuera de un `if __name__ == "__main__":`.
 
 **Por qué importa.** Basta con hacer `import bad_code` (por ejemplo, desde un test) para que arranque
@@ -131,7 +153,7 @@ ejecución detrás de `if __name__ == "__main__": sys.exit(main())`.
 
 ## 7. Tipos inferidos y `float` para dinero — **Media**
 
-**Qué está mal.** `pd.read_csv` (línea 7) adivina los tipos.
+**Qué está mal aplicado.** `pd.read_csv` (línea 7) adivina los tipos.
 
 **Por qué importa.** 🔎 `precio` y `cantidad` se leen como `float64`: el precio
 `16.115560169153356500` se convierte en `16.115560169153355`. En sumas de millones de filas esos
@@ -143,7 +165,7 @@ errores de redondeo se acumulan en los ingresos. `fecha_proceso` queda como text
 
 ## 8. Multi-tenant resuelto con un literal sensible a mayúsculas — **Media**
 
-**Qué está mal.** El país llega como literal (`"GT"`, línea 29) y se compara exacto con la columna
+**Qué está mal aplicado.** El país llega como literal (`"GT"`, línea 29) y se compara exacto con la columna
 (línea 8).
 
 **Por qué importa.** La convención de la plataforma es el código de tenant en minúscula; si alguien
@@ -154,7 +176,7 @@ normalizar la columna de origen (`lower(trim(pais))`) antes de comparar.
 
 ## 9. Legibilidad — **Baja**
 
-**Qué está mal.**
+**Qué está mal aplicado.**
 - Nombres poco descriptivos o inconsistentes: `fecha` en lugar de `fecha_proceso`, `total` (es
   ingreso), `out`, `sdf`; la variable `i` (línea 10) no se usa.
 - Sin type hints ni docstring en `process` (línea 6).
@@ -164,13 +186,13 @@ normalizar la columna de origen (`lower(trim(pais))`) antes de comparar.
 **Por qué importa.** El código se lee más veces de las que se escribe; nombres claros y funciones
 con una sola responsabilidad hacen que el siguiente cambio sea seguro.
 
-**Cómo se corrige.** Separar lectura (`read_deliveries`), transformación (`routine_deliveries`) y
-escritura (`run`); nombres que digan lo que contienen (`revenue`, `cantidad_normalizada_st`);
-`logging` con el tenant en cada mensaje.
+**Cómo se corrige.** Separar la transformación (`routine_deliveries`, una función pura que se
+prueba sin archivos) de la lectura y escritura (`process`); nombres que digan lo que contienen
+(`fecha_proceso` en vez de `fecha`, `cantidad_st`); `logging` con el tenant en cada mensaje.
 
 ## 10. Sin pruebas — **Media**
 
-**Qué está mal.** No hay ninguna prueba, y la estructura actual (observación 6) impide escribirlas.
+**Qué está mal aplicado.** No hay ninguna prueba, y la estructura actual (observación 6) impide escribirlas.
 
 **Por qué importa.** Nada garantiza que el factor 20 o el filtro de rutina sigan funcionando
 después del próximo cambio.
@@ -186,7 +208,8 @@ falla.
 
 Lo haría en una **conversación 1:1 o una sesión de pair programming**, no solo con comentarios en
 el PR. Empezaría por lo que está bien: entendió la regla de negocio, y eso es lo más difícil de
-aprender. Después daría el feedback con el formato **situación → comportamiento → impacto** y con
+aprender. Le preguntaría el porqué lo resolvió de esa manera.
+Después daría el feedback con el formato **situación → comportamiento → impacto** y con
 evidencia concreta: "con GT, este script publica un total negativo y dos filas sin fecha".
 
 En vez de diez comentarios a la vez, **priorizaría tres**: no publicar datos inválidos en silencio,

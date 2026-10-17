@@ -5,8 +5,12 @@ from __future__ import annotations
 from pyspark.sql import SparkSession
 
 
-def get_spark(app_name: str = "saas-pipeline") -> SparkSession:
-    """Return the SparkSession to use, with Delta Lake enabled and UTC/strict-date settings."""
+def get_spark(app_name: str = "saas-pipeline", warehouse_dir: str | None = None) -> SparkSession:
+    """Return the SparkSession to use, with Delta Lake enabled and UTC/strict-date settings.
+
+    `warehouse_dir` only applies to a new local session: it is where catalog-mode tables
+    (storage.mode=catalog with the local spark_catalog) are stored, e.g. a temp dir in tests.
+    """
     # On Databricks (or inside tests) a session already exists and must be reused.
     spark = SparkSession.getActiveSession()
     if spark is None:
@@ -25,6 +29,8 @@ def get_spark(app_name: str = "saas-pipeline") -> SparkSession:
             .config("spark.sql.shuffle.partitions", "8")  # small dataset, avoid 200 tiny tasks
             .config("spark.ui.showConsoleProgress", "false")
         )
+        if warehouse_dir:
+            builder = builder.config("spark.sql.warehouse.dir", warehouse_dir)
         spark = configure_spark_with_delta_pip(builder).getOrCreate()
         spark.sparkContext.setLogLevel("WARN")
 

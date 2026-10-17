@@ -77,6 +77,27 @@ def test_invalid_inputs_are_rejected():
         load_config("dev", "sv", ["execution.start_date=2025-07-01"], config_dir=CONFIG_DIR)
 
 
+@pytest.mark.parametrize(
+    "value", ["20250301", "2025-W10-1", "2025-3-1", "01/03/2025", "2025-02-30"]
+)
+def test_dates_must_be_real_and_strictly_yyyy_mm_dd(value):
+    """Only YYYY-MM-DD calendar dates are accepted (5.8), with a clear ConfigError otherwise.
+
+    20250301 is the most likely mistake (it is the fecha_proceso format): OmegaConf parses it as
+    an int, which used to crash with a TypeError instead of a readable message.
+    """
+    with pytest.raises(ConfigError):
+        load_config("dev", "sv", [f"execution.start_date={value}"], config_dir=CONFIG_DIR)
+
+
 def test_partition_value_format():
     """Config dates are converted to the fecha_proceso partition format."""
     assert to_partition_value("2025-03-14") == "20250314"
+
+
+def test_cli_reports_config_errors_without_a_traceback(caplog):
+    """A bad --start-date ends with a readable message and exit code 2 (before starting Spark)."""
+    from saas_pipeline.cli import main
+
+    assert main(["run", "--tenant", "sv", "--start-date", "20250301"]) == 2
+    assert "Dates must use YYYY-MM-DD" in caplog.text

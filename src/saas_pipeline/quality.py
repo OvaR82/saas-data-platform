@@ -13,6 +13,7 @@ from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 from saas_pipeline.silver import FACT_KEY
+from saas_pipeline.storage import TableRef, append_table
 
 log = logging.getLogger(__name__)
 
@@ -88,19 +89,34 @@ def check_single_current_version(dim: DataFrame) -> CheckResult:
     )
 
 
+def _with_previous_end(dim: DataFrame) -> DataFrame:
+    """Add _previous_end: valid_to of the previous version of the same material (null for the
+    first one). Spark does not allow window functions directly inside a filter."""
+    previous_end = F.lag("valid_to").over(Window.partitionBy("material").orderBy("valid_from"))
+    return dim.withColumn("_previous_end", previous_end)
+
+
 def check_no_overlapping_versions(dim: DataFrame) -> CheckResult:
     """Count versions that overlap the previous one of the same material (critical).
 
     Overlapping versions would make the temporal join duplicate fact rows.
     """
-    # Compare each version with the previous one of the same SKU: it must start after the
-    # previous one ends. (Spark does not allow window functions directly inside a filter.)
-    previous_end = F.lag("valid_to").over(Window.partitionBy("material").orderBy("valid_from"))
-    with_previous = dim.withColumn("_previous_end", previous_end)
-    failed = with_previous.filter(F.col("_previous_end") >= F.col("valid_from")).count()
+    # Each version must start after the previous one of the same SKU ends.
+    failed = _with_previous_end(dim).filter(F.col("_previous_end") >= F.col("valid_from")).count()
     return _result(
         "silver", "dim_materials", "no_overlapping_versions", CRITICAL, dim.count(), failed
     )
+
+
+def check_no_version_gaps(dim: DataFrame) -> CheckResult:
+    """Count versions that start later than the day after the previous one ends (warning).
+
+    A gap leaves dates without a valid version: deliveries on those dates are quarantined as
+    no_material_version_at_date. It is a catalog problem, not a transaction problem.
+    """
+    starts_late = F.date_add(F.col("_previous_end"), 1) < F.col("valid_from")
+    failed = _with_previous_end(dim).filter(starts_late).count()
+    return _result("silver", "dim_materials", "no_version_gaps", WARNING, dim.count(), failed)
 
 
 def check_reconciliation(metrics: dict[str, int]) -> CheckResult:
@@ -165,10 +181,47 @@ def run_silver_checks(
         check_material_enriched(fact),
         check_single_current_version(dim),
         check_no_overlapping_versions(dim),
+        check_no_version_gaps(dim),
         check_reconciliation(metrics),
         check_quarantine_rate(metrics, max_quarantine_rate),
         check_discarded_delivery_types(metrics),
     ]
+
+
+# --- Gold checks ---------------------------------------------------------------------------
+
+
+def check_gold_reconciles_with_silver(fact: DataFrame, daily: DataFrame) -> CheckResult:
+    """Compare Gold daily metrics with an independent aggregation of Silver (critical).
+
+    Every (fecha_proceso, tipo_entrega) must exist on both sides with the same units and
+    revenue: catches lost, duplicated or wrongly aggregated groups. The expected values are
+    computed here, not with gold.build_daily_metrics, so the check is not circular.
+    """
+    keys = ["fecha_proceso", "tipo_entrega"]
+    expected = fact.groupBy(*keys).agg(
+        F.sum("cantidad_normalizada_st").alias("_units"),
+        F.sum(F.col("cantidad_normalizada_st") * F.col("precio")).alias("_revenue"),
+    )
+    published = daily.select(
+        *keys,
+        F.col("total_units").alias("_gold_units"),
+        F.col("total_revenue").alias("_gold_revenue"),
+    )
+    # Full outer join: a group missing on either side is a mismatch too.
+    joined = expected.join(published, keys, "full_outer")
+    matches = F.col("_units").eqNullSafe(F.col("_gold_units")) & F.col("_revenue").eqNullSafe(
+        F.col("_gold_revenue")
+    )
+    failed = joined.filter(~matches).count()
+    return _result(
+        "gold",
+        "daily_metrics_by_delivery_type",
+        "gold_reconciles_with_silver",
+        CRITICAL,
+        joined.count(),
+        failed,
+    )
 
 
 # --- persistence and enforcement -----------------------------------------------------------
@@ -177,7 +230,7 @@ def run_silver_checks(
 def write_quality_logs(
     spark: SparkSession,
     results: list[CheckResult],
-    path: str,
+    ref: TableRef,
     run_id: str,
     batch_id: str,
     tenant: str,
@@ -207,7 +260,7 @@ def write_quality_logs(
     logs = spark.createDataFrame(rows, QUALITY_LOG_COLUMNS).withColumn(
         "executed_at", F.current_timestamp()
     )
-    logs.write.format("delta").mode("append").save(path)
+    append_table(logs, ref)
 
 
 def enforce(results: list[CheckResult], tenant: str, fail_on_critical: bool) -> None:

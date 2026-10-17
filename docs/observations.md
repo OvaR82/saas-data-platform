@@ -7,9 +7,9 @@ sin dejarla registrada aquí.
 
 | Tipo | Entradas | Qué contiene |
 |---|---|---|
-| Ambigüedades resueltas | A1–A11 | Huecos del enunciado y cómo se resolvieron en el código |
+| Ambigüedades resueltas | A1–A15 | Huecos del enunciado y cómo se resolvieron en el código |
 | Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
-| Mejoras (Horizonte 2-3) | H1–H6 | Evolución tecnológica propuesta |
+| Mejoras (Horizonte 2-3) | H1–H8 | Evolución tecnológica propuesta; H8 integra todas en una plataforma objetivo con criterio de costo |
 
 Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver), **D3**
 (aislamiento por schema frente a catálogo) y **D5** (la clave de negocio no identifica una entrega).
@@ -55,7 +55,10 @@ Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver)
 - **Decisión**: el MERGE se acota al rango reprocesado (`t.fecha_proceso BETWEEN start AND end`) y agrega `WHEN NOT MATCHED BY SOURCE ... DELETE` dentro de ese rango. Así el resultado de reprocesar un rango es exactamente el mismo que el de procesarlo por primera vez. `dim_materials` no lleva esa cláusula: su historia nunca se borra.
 
 ### A9. SCD2 cuando la fuente ya trae la historia
-- **Contexto**: el CSV del catálogo ya trae las versiones con `valid_from`/`valid_to`.
+- **Contexto**: el CSV del catálogo ya trae las versiones con `valid_from`/`valid_to`. Como toda
+  fuente, entra por Bronze (`bronze/<tenant>/materials`, snapshot en strings con columnas técnicas,
+  reemplazado en cada corrida) y Silver lo lee de ahí: ninguna capa lee de más atrás que la
+  inmediata anterior (5.1).
 - **Decisión**: MERGE sobre `(material, valid_from)`: versiones nuevas se insertan y las existentes se actualizan (cierre de vigencia o corrección). `is_current` se **recalcula** desde `valid_to = 9999-12-31`; el flag de la fuente no se usa (el enunciado lo define como "no fuente de verdad única").
 - **Salvaguarda**: dos checks críticos validan las invariantes del SCD2 antes de Gold: una sola versión vigente por SKU y versiones sin solapamiento (un solapamiento duplicaría filas en el join temporal).
 - **Límite conocido**: si la fuente enviara solo la versión nueva sin cerrar la anterior, el check de solapamiento lo detecta pero el pipeline no la cierra automáticamente. Ver mejora H1.
@@ -68,6 +71,66 @@ Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver)
 ### A11. Columnas de fecha en Silver
 - **Arquitectura**: fechas de negocio con tipo `date`; `fecha_proceso` es la clave de partición con formato `YYYYMMDD`.
 - **Decisión**: se conservan ambas: `fecha_proceso` (string `yyyymmdd`, partición y clave del MERGE, igual que en Bronze y en los paths) y `fecha_proceso_date` (`date`, usada en el join temporal y para consumo analítico).
+
+### A12. Recálculo de Gold por mes completo en la tabla mensual
+- **Arquitectura**: 5.5 define el recálculo de Gold "por partición de fecha".
+- **Problema**: la segunda tabla Gold (`top_materials_by_month`, bonus) es un ranking mensual.
+  Recalcularla solo con las fechas del rango procesado daría un ranking incorrecto: reprocesar del
+  10 al 20 de marzo dejaría un "top de marzo" calculado con 11 días.
+- **Decisión**: el rango se amplía a meses completos (del primer día del mes inicial al último día
+  del mes final), se leen de Silver esos meses y se reemplazan con `replaceWhere` sobre
+  `month_start`. Se mantiene el principio de 5.5 (Gold es derivado y se recalcula entero para lo
+  que toca), aplicado a la granularidad de la tabla. La tabla diaria sigue el recálculo por fecha.
+- **Verificación**: `test_partial_range_recomputes_the_whole_month` reprocesa del 10 al 20 de
+  marzo y comprueba que el ranking de marzo es idéntico al de la corrida completa y que los demás
+  meses no se tocaron.
+
+### A13. "Material no presente en el catálogo": SKU inexistente frente a SKU sin versión vigente
+- **Arquitectura**: 5.6 manda a cuarentena el "material no presente en el catálogo" y 5.7 pide el
+  join temporal.
+- **Problema**: con el join temporal, una entrega puede quedar sin versión por dos causas
+  distintas: el SKU no existe en el catálogo, o existe pero ninguna versión cubre esa fecha (un
+  hueco entre versiones, o una entrega anterior a la primera vigencia). La corrección es
+  diferente: en el primer caso hay que revisar la transacción; en el segundo, el catálogo.
+- **Decisión**: dos motivos de cuarentena, `material_not_in_catalog` (SKU desconocido) y
+  `no_material_version_at_date` (SKU conocido, sin versión en la fecha), y un check `warning`
+  `no_version_gaps` sobre `dim_materials`, gemelo del check crítico de solapamientos. Es
+  *warning* y no *critical* porque un hueco no corrompe datos: las entregas afectadas van a
+  cuarentena con un motivo que dice qué corregir.
+- **Estado actual**: el catálogo de la prueba no tiene huecos (vigencias contiguas desde
+  2024-01-01) y las 23 entregas en cuarentena por material son SKUs inexistentes (`XX...`).
+- **Relacionado**: los códigos de negocio `tipo_entrega` y `unidad` se comparan sin espacios y en
+  mayúsculas, para que un `zpre` no se descarte como tipo fuera de alcance.
+
+### A14. Dos inconsistencias del enunciado: ubicación de la cuarentena y catálogo de `quality_logs`
+- **Cuarentena**: el diagrama de 5.10 la dibuja dentro de un bloque "SHARED" (`quarantine_<table>`),
+  mientras que 5.2 (`data/<layer>_quarantine/<tenant>/<table>/`) y 5.6
+  (`<layer>_quarantine_<tenant>.<table>`) la definen **por tenant**.
+  **Decisión**: por tenant, como dicen las dos secciones normativas; el diagrama se lee como
+  esquemático. Además es lo coherente con el aislamiento: la cuarentena contiene datos del tenant.
+- **`quality_logs`**: 5.9 la ubica en `<env>.shared.quality_logs`, pero 5.2 nombra los catálogos
+  `saas_<env>`. **Decisión**: `saas_<env>.shared.quality_logs`, en el mismo catálogo que el resto
+  de las tablas del ambiente (`quality_logs_ref` en `config.py`).
+- **Trade-off**: ninguno relevante; se registra para que la interpretación sea explícita.
+
+### A15. Del layout por rutas a los nombres de Unity Catalog
+- **Arquitectura**: 5.2 pide implementar la estructura de rutas y dice que "en una migración a
+  Databricks, los paths se mapean a tablas Unity con los mismos nombres lógicos". La sección 3
+  exige además que el código sea compatible con Databricks.
+- **Problema**: si el código solo sabe leer y escribir por ruta, la "migración" implica reescribir
+  todas las lecturas y escrituras. Y en workspaces solo con Unity Catalog (como la Free Edition)
+  el acceso por ruta no está disponible sin una *external location*.
+- **Decisión**: un parámetro `storage.mode`. Con `path` (por defecto) se implementa exactamente el
+  layout de 5.2. Con `catalog`, las mismas funciones usan `saas_<env>.<layer>_<tenant>.<tabla>`,
+  `saas_<env>.<layer>_quarantine_<tenant>.<tabla>` y `saas_<env>.shared.quality_logs`. Las capas no
+  saben cuál de los dos usan: reciben una referencia de tabla (`TableRef`). El MERGE se ejecuta en
+  SQL (`MERGE INTO`), que acepta ambos tipos de destino.
+- **Verificación**: `tests/test_catalog_mode.py` corre el pipeline completo por nombre de tabla
+  contra el catálogo local de Spark (`spark_catalog`), dos veces, y obtiene los mismos números que
+  por ruta (722 hechos, 35 versiones, 20 en cuarentena, 125 + 30 filas Gold para `sv`). No se
+  ejecutó en un workspace real de Databricks.
+- **Relación con D3**: si se adoptara un catálogo por tenant, solo cambiaría cómo `table_ref`
+  compone el nombre; ninguna capa se toca.
 
 ## Desacuerdos con la arquitectura (propuesta alternativa)
 
@@ -150,3 +213,75 @@ comentarios de tabla y columna en Unity Catalog (son el contexto que lee el agen
 o una capa semántica con las definiciones oficiales (qué es "revenue", qué es "entrega de rutina"),
 vistas cross-tenant con *row filters* para que cada agente solo vea los tenants permitidos, y
 acceso a través de herramientas gobernadas (Genie, funciones de UC) en lugar de SQL libre.
+
+### H7. MongoDB como fuente operacional y Couchbase como capa de servicio
+El stack de la arquitectura incluye MongoDB y Couchbase como "fuentes operacionales / serving",
+pero la prueba trabaja con un CSV. Cómo encajarían sin cambiar el diseño por capas:
+
+- **MongoDB → Bronze.** Lectura con el conector oficial de MongoDB para Spark: una carga inicial
+  en batch y después *change streams* para traer solo los documentos nuevos o modificados (CDC),
+  con el checkpoint en el almacenamiento del tenant. Las credenciales salen del secret scope del
+  tenant (ver `infra.md`), nunca del código. Bronze guarda el documento como llega (JSON en una
+  columna, más las columnas técnicas), igual que hoy guarda el CSV como strings: un campo nuevo en
+  la fuente no rompe la ingesta, y el aplanado y tipado siguen siendo responsabilidad de Silver.
+- **Gold → Couchbase.** Couchbase sirve lecturas de baja latencia a aplicaciones (por ejemplo, el
+  top de materiales de un tenant en una app comercial). Se alimentaría con un paso de publicación
+  *después* de Gold y solo con tablas Gold: un documento por clave de negocio (por ejemplo,
+  `tenant::mes::material`), con *upsert* para que publicar dos veces dé el mismo resultado.
+  Couchbase es una copia derivada: si se pierde, se reconstruye desde Gold.
+- **Por qué así:** el pipeline sigue siendo la única fuente de verdad (Silver/Gold en Delta y Unity
+  Catalog); las bases operacionales quedan en los bordes (entrada y salida) y no se mezclan con el
+  procesamiento analítico.
+- **Trade-offs:** el CDC desde MongoDB exige manejar borrados y reordenamientos de eventos (la
+  clave de negocio y `_ingestion_timestamp` lo resuelven en el MERGE de Silver). Publicar a
+  Couchbase agrega un sistema más que monitorear; si la latencia que piden las apps lo permite,
+  una tabla Gold servida por un SQL warehouse evita esa copia.
+
+### H8. Plataforma objetivo: cómo integraría todo lo anterior sobre Databricks, con criterio de costo
+Las mejoras H1–H7 y los desacuerdos D1–D5 convergen en una misma plataforma. Resumen de cómo la
+construiría, con tres criterios: una sola base de código multi-tenant, usar lo que la plataforma
+ya resuelve antes de escribir o comprar algo, y pagar solo por el cómputo que hace trabajo.
+
+**Arquitectura y stack.**
+- *Ingesta*: Auto Loader (o Lakeflow Connect si hay conector gestionado) escribiendo Bronze como
+  streaming tables, incremental y con checkpoint, en lugar del batch del archivo completo.
+- *Transformación*: un único pipeline declarativo (Lakeflow Declarative Pipelines) parametrizado
+  por tenant, que reutiliza las funciones puras de este repo. Las expectations reemplazan los
+  checks propios (warning → `expect`, cuarentena → `expect_or_drop` más tabla de cuarentena,
+  critical → `expect_or_fail`) y AUTO CDC reemplaza el MERGE SCD2 escrito a mano.
+- *Gobierno*: catálogo por tenant y ambiente (`saas_<env>_<tenant>`) más un catálogo `shared`
+  para el dato maestro y las vistas cross-tenant; grants por grupo, tags, row filters y linaje en
+  Unity Catalog; Terraform crea cada catálogo desde el mismo YAML del tenant.
+- *Orquestación*: Lakeflow Jobs con `for_each` sobre los tenants, reintentos y notificaciones; los
+  tenants chicos agrupados en un job y los grandes con job y SLA propios.
+- *Consumo*: SQL warehouse serverless, metric views como capa semántica, AI/BI Dashboards y Genie;
+  los agentes de IA (fase 2) acceden a través de funciones de UC y heredan sus permisos. Una base
+  de serving (Couchbase o Lakebase) solo cuando exista un caso de latencia demostrado.
+- *Despliegue*: Asset Bundles con targets dev/qa/main, desplegados desde GitHub Actions con OIDC;
+  pruebas unitarias en local (como hoy) e integración contra `qa`.
+
+**Metodología.** Tenant como configuración y alta por GitOps (YAML + `terraform apply` + corrida
+en `qa`); una tabla de control en UC para parámetros operativos que cambian seguido; productos de
+datos con dueño y SLO de frescura; contratos de datos por fuente validados en CI; ADRs para toda
+desviación de la arquitectura (como este archivo); revisión mensual de costos con las system
+tables.
+
+**Costo y recursos.** Serverless para jobs, pipelines y SQL (sin clusters encendidos); batch
+programado según la frescura que el negocio paga, streaming solo con un caso real; Liquid
+Clustering y Predictive Optimization en lugar de particiones y jobs de mantenimiento propios;
+retención explícita (VACUUM, Bronze a almacenamiento frío a los N meses); dato maestro en `shared`
+en vez de N copias; tags `tenant`/`producto`/`ambiente` y `system.billing` para ver el costo por
+tenant desde el primer día. Para el volumen de esta prueba, un job diario serverless y un warehouse
+pequeño con auto-stop cuestan decenas de dólares al mes por tenant; lo que dispara el gasto es
+cómputo ocioso, streaming innecesario y copias de datos.
+
+**Hoja de ruta.** H1 (0–3 meses): bundle, job `for_each` ejecutando el paquete actual como wheel,
+catálogo por tenant, tags y serverless, sin reescribir nada. H2 (3–9 meses): pipeline declarativo,
+Auto Loader, expectations, AUTO CDC, `dim_*` a `shared`, Monitoring y contratos. H3 (9+ meses):
+capa semántica, Genie y agentes; serving operacional solo si hace falta.
+
+**Trade-offs.** El pipeline declarativo ata el código a Databricks (el paquete actual es portable);
+se mitiga manteniendo las reglas de negocio como funciones puras, que son las que tienen valor.
+Un catálogo por tenant multiplica objetos que gobernar; se compensa con Terraform generándolos
+desde el YAML. Serverless simplifica la operación pero conviene medir el costo por DBU frente a
+job clusters en los tenants grandes.

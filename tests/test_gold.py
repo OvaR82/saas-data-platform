@@ -14,10 +14,19 @@ FACT_COLUMNS = (
 )
 
 
-def fact_row(fecha, material, revenue, categoria="CAT"):
+def fact_row(process_date, material, revenue, category="CAT"):
     """Return one Silver fact row with 1 unit at `revenue`, so revenue is easy to reason about."""
-    day = date(int(fecha[:4]), int(fecha[4:6]), int(fecha[6:]))
-    return ("sv", fecha, day, material, f"desc {material}", categoria, Decimal(revenue), Decimal(1))
+    day = date(int(process_date[:4]), int(process_date[4:6]), int(process_date[6:]))
+    return (
+        "sv",
+        process_date,
+        day,
+        material,
+        f"desc {material}",
+        category,
+        Decimal(revenue),
+        Decimal(1),
+    )
 
 
 def test_top_materials_ranks_per_month_and_keeps_top_n(spark):
@@ -42,8 +51,8 @@ def test_top_materials_ranks_per_month_and_keeps_top_n(spark):
 def test_top_materials_reports_the_latest_version_in_the_month(spark):
     """If the material changes version mid-month, the latest category of that month is used."""
     rows = [
-        fact_row("20250305", "A", "10", categoria="OLD"),
-        fact_row("20250320", "A", "10", categoria="NEW"),
+        fact_row("20250305", "A", "10", category="OLD"),
+        fact_row("20250320", "A", "10", category="NEW"),
     ]
     out = gold.build_top_materials(spark.createDataFrame(rows, FACT_COLUMNS), top_n=5).collect()
     assert [r.categoria for r in out] == ["NEW"]

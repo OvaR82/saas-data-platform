@@ -14,11 +14,13 @@ from saas_pipeline import bronze, gold, quality, silver
 from saas_pipeline.config import (
     DEFAULT_CONFIG_DIR,
     load_config,
+    quality_logs_ref,
     resolve_tenants,
-    table_path,
+    table_ref,
     to_partition_value,
 )
 from saas_pipeline.session import get_spark
+from saas_pipeline.storage import read_table
 
 log = logging.getLogger(__name__)
 
@@ -32,17 +34,25 @@ def _silver_checks(
     """Run the Silver checks on what was actually persisted, not on in-memory DataFrames."""
     start = to_partition_value(cfg.execution.start_date)
     end = to_partition_value(cfg.execution.end_date)
-    fact = (
-        spark.read.format("delta")
-        .load(table_path(cfg, "silver", silver.FACT_TABLE))
-        .filter(F.col("fecha_proceso").between(start, end))
-    )
-    dim = spark.read.format("delta").load(table_path(cfg, "silver", silver.DIM_TABLE))
+    fact = gold.read_fact(spark, cfg, start, end)
+    dim = read_table(spark, table_ref(cfg, "silver", silver.DIM_TABLE))
     return quality.run_silver_checks(fact, dim, metrics, cfg.quality.max_quarantine_rate)
 
 
+def _gold_checks(spark: SparkSession, cfg: DictConfig) -> list[quality.CheckResult]:
+    """Compare the persisted Gold daily metrics with Silver for the processed range."""
+    start = to_partition_value(cfg.execution.start_date)
+    end = to_partition_value(cfg.execution.end_date)
+    daily = read_table(spark, table_ref(cfg, "gold", gold.TABLE)).filter(
+        F.col("fecha_proceso").between(start, end)
+    )
+    return [
+        quality.check_gold_reconciles_with_silver(gold.read_fact(spark, cfg, start, end), daily)
+    ]
+
+
 def run_tenant(spark: SparkSession, cfg: DictConfig, layers: list[str], run_id: str) -> None:
-    """Bronze -> Silver -> quality gate -> Gold for a single tenant."""
+    """Bronze -> Silver -> quality gate -> Gold -> Gold checks for a single tenant."""
     tenant = cfg.tenant.code
     # run_id identifies the whole execution; batch_id the work of one tenant inside it.
     batch_id = f"{run_id}_{tenant}"
@@ -54,12 +64,19 @@ def run_tenant(spark: SparkSession, cfg: DictConfig, layers: list[str], run_id: 
             checks += _silver_checks(spark, cfg, silver.run(spark, cfg, batch_id))
     finally:
         # Persist whatever was checked, even if a later step failed.
-        quality.write_quality_logs(spark, checks, cfg.paths.quality_logs, run_id, batch_id, tenant)
+        quality.write_quality_logs(spark, checks, quality_logs_ref(cfg), run_id, batch_id, tenant)
 
     # Raises CriticalQualityError (tenant fails, Gold is skipped) if configured to.
     quality.enforce(checks, tenant, cfg.quality.fail_on_critical)
     if "gold" in layers:
         gold.run(spark, cfg, batch_id)
+        # Gold checks run on what was published: they detect a bad aggregation (and fail the
+        # tenant with fail_on_critical), but cannot prevent publishing it.
+        gold_checks = _gold_checks(spark, cfg)
+        quality.write_quality_logs(
+            spark, gold_checks, quality_logs_ref(cfg), run_id, batch_id, tenant
+        )
+        quality.enforce(gold_checks, tenant, cfg.quality.fail_on_critical)
 
 
 def run(

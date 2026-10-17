@@ -20,7 +20,8 @@ Corrida completa de los 6 tenants (`make run`), semestre 2025-01-01 a 2025-06-30
 | Etapa | Filas | Detalle |
 |---|---|---|
 | CSV de entrada | 3 115 | 6 tenants: SV, HN, EC, JM, GT, PE |
-| Bronze | 3 075 | Las 40 restantes van a `bronze_quarantine` (fecha nula o inválida) |
+| Bronze: `deliveries` | 3 075 | Las 40 restantes van a `bronze_quarantine` (fecha nula o inválida) |
+| Bronze: `materials` | 35 por tenant | Snapshot del catálogo; Silver construye `dim_materials` desde aquí |
 | Silver: duplicados exactos | 15 | Se conserva una copia |
 | Silver: descartadas | 188 | `tipo_entrega` COBR o Z99: se cuentan, no se guardan |
 | Silver: cuarentena | 75 | Cantidad ≤ 0 o nula, material fuera de catálogo |
@@ -43,8 +44,10 @@ Todos los checks críticos pasan. Dos ejecuciones seguidas dejan exactamente los
 | ruff / pytest | 0.7.4 / 8.3.3 |
 
 Las versiones son compatibles con Databricks Runtime 15.x LTS (Spark 3.5, Delta 3). Todo el árbol
-de dependencias está fijado en `uv.lock`. Python queda fijado en 3.11 (`>=3.11,<3.12`) porque
-PySpark 3.5 no soporta oficialmente 3.12.
+de dependencias está fijado en `uv.lock`. El entorno local y el CI usan Python 3.11
+(`.python-version`) porque PySpark 3.5 no soporta oficialmente 3.12; el paquete en sí acepta
+Python ≥ 3.11. PySpark y delta-spark no son dependencias del paquete sino del grupo `spark`,
+que `uv` instala por defecto: en Databricks los aporta el runtime (ver "Ejecutar en Databricks").
 
 ## Puesta en marcha
 
@@ -102,17 +105,30 @@ final se listan los fallidos y el proceso termina con código distinto de cero.
 
 ```bash
 make lint             # ruff check + ruff format --check (PEP8, imports, bugs comunes)
-make test             # pytest: 33 pruebas, con Spark real
+make test             # pytest: 45 pruebas, con Spark real (en modo ANSI)
 make validate-config  # carga todas las combinaciones de ambiente y tenant
 make format           # corrige el formato automáticamente
+make infra-validate   # terraform fmt + validate del snippet de docs/infra.md (requiere Terraform)
 ```
 
-Las pruebas cubren: configuración y precedencia, validación de fechas, idempotencia de Bronze y
-reproceso por rango, conversión de unidades, flags, join temporal SCD2, cuarentena con todos sus
-motivos, métricas Gold, ranking mensual y su reproceso por mes completo, checks de calidad y su persistencia, la puerta `fail_on_critical`, una
-corrida completa repetida y el refactor de mentoría.
+Las pruebas cubren:
 
-El mismo conjunto corre en GitHub Actions en cada push y pull request
+- **Configuración**: precedencia, rutas por ambiente, fechas estrictas `YYYY-MM-DD` y errores de
+  configuración sin traceback.
+- **Bronze**: validación de fechas, columnas técnicas, idempotencia, reproceso de un rango y el
+  snapshot del catálogo.
+- **Silver**: casts seguros con valores basura, conversión de unidades, flags, join temporal
+  SCD2 y cuarentena con todos sus motivos (incluido "SKU sin versión vigente").
+- **Gold**: métricas diarias, ranking mensual y su recálculo por mes completo.
+- **Calidad**: invariantes SCD2 (solapamientos, huecos, una versión vigente), conciliación, check
+  de Gold contra Silver, esquema de `quality_logs` y la puerta `fail_on_critical`.
+- **De punta a punta**: corrida completa repetida (idempotencia), por ruta y por nombre de tabla
+  (`storage.mode=catalog`).
+- **Mentoría**: el refactor de `good_code.py`.
+
+Toda la suite corre con el modo ANSI de Spark activado (el más estricto, por defecto en
+Databricks serverless). En GitHub Actions corre en cada pull request y en cada push a `main`,
+junto con el linter, la validación de los YAML y el armado del wheel
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Notebook de demo
@@ -126,13 +142,72 @@ navegador. `demo.ipynb` ejecuta el pipeline para un tenant y muestra los checks 
 cuarentena por motivo, la evidencia del join temporal, el historial de Delta (idempotencia), el
 reproceso de un mes y vistas SQL para consultas libres.
 
+## Ejecutar en Databricks
+
+La prueba se demuestra en local, pero el código está preparado para Databricks sin cambios:
+
+| Qué | Cómo se resolvió |
+|---|---|
+| Sesión de Spark | `get_spark()` reutiliza la sesión activa del cluster; no crea una local ni descarga jars |
+| PySpark y Delta | No son dependencias del paquete (los aporta el runtime); instalarlo no pisa el Spark del cluster |
+| Modo ANSI (activado por defecto en serverless) | Fechas, casts y divisiones usan `try_to_timestamp`, `try_cast` y `try_divide`; los tests corren con ANSI activado |
+| Rutas | Ninguna fija en el código: configuración (`config_dir`) y datos (`paths.*`) se pasan por parámetro |
+| Tablas por nombre de Unity Catalog | `storage.mode=catalog`: las mismas capas leen y escriben `saas_<env>.<layer>_<tenant>.<tabla>` en lugar de rutas (probado en local contra el catálogo de Spark) |
+
+**Ejemplo en un notebook**, con el repo clonado como *Git folder* del workspace:
+
+```python
+%pip install /Workspace/Users/<usuario>/saas-data-platform
+```
+```python
+from pathlib import Path
+from saas_pipeline.pipeline import LAYER_ORDER, run
+
+REPO = Path("/Workspace/Users/<usuario>/saas-data-platform")
+run(
+    env="qa",
+    tenant_selection="all",
+    layers=list(LAYER_ORDER),
+    overrides=[
+        "paths.raw=/Volumes/<catalogo>/<schema>/<volumen>/raw",  # CSV de entrada
+        "storage.mode=catalog",  # tablas saas_qa.<layer>_<tenant>.<tabla>
+    ],
+    config_dir=REPO / "config",
+)
+```
+
+Como **job**, el paquete se instala como wheel (`uv build`) y se ejecuta la entrada
+`saas-pipeline` con los mismos argumentos que en local, más `SAAS_CONFIG_DIR` apuntando a los YAML.
+
+Limitaciones a tener en cuenta:
+
+- **No se ejecutó en un workspace real**: la compatibilidad está diseñada y probada en local (con
+  ANSI activado), no validada en Databricks.
+- **Ruta o nombre de tabla**: por defecto (`storage.mode=path`) las tablas se leen y escriben por
+  ruta, como pide la sección 5.2; en Databricks eso requiere una *external location* con
+  permisos sobre la ruta de ADLS. Con `storage.mode=catalog` se usan los nombres de Unity Catalog
+  de la arquitectura, que es lo recomendado en workspaces solo con Unity Catalog (como la Free
+  Edition). El catálogo (`saas_<env>`) y sus schemas los crea Terraform (`docs/infra.md`); si no
+  existen, el pipeline intenta crearlos (`CREATE SCHEMA IF NOT EXISTS`), lo que requiere
+  permisos. Ver `observations.md` A15.
+- **El modo `catalog` en local**: funciona contra el catálogo propio de Spark (`spark_catalog`),
+  pero ese catálogo vive en memoria y se pierde al terminar el proceso, mientras las tablas
+  quedan en disco. Por eso desde la CLI corre bien una vez por carpeta y la segunda corrida
+  falla (`DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION`). En Databricks no ocurre (Unity Catalog es
+  persistente). Para verificarlo en local: `uv run pytest tests/test_catalog_mode.py`, que corre
+  el pipeline dos veces dentro de la misma sesión.
+- **Configuraciones de Spark en serverless**: `get_spark()` fija la zona horaria (UTC) y la
+  política de parseo de fechas. Serverless solo permite cambiar algunas configuraciones; conviene
+  confirmar que esas dos están permitidas en el workspace de destino.
+
 ## Arquitectura implementada
 
 ```mermaid
 flowchart TD
     RAW["RAW<br/>data/raw/*.csv"] -->|"overwrite del rango<br/>(replaceWhere)"| BRONZE["BRONZE<br/>{tenant}/deliveries<br/>strings + columnas técnicas"]
     RAW -.->|"fecha nula o inválida"| BQ["bronze_quarantine"]
-    CAT["materials_catalog.csv"] -->|"MERGE (material, valid_from)"| DIM["SILVER<br/>{tenant}/dim_materials<br/>SCD Type 2"]
+    CAT["RAW<br/>materials_catalog.csv"] -->|"snapshot"| BMAT["BRONZE<br/>{tenant}/materials<br/>strings + columnas técnicas"]
+    BMAT -->|"MERGE (material, valid_from)"| DIM["SILVER<br/>{tenant}/dim_materials<br/>SCD Type 2"]
     BRONZE -->|"dedupe · descarte · tipos · CS→ST · flags"| JOIN{{"join temporal<br/>fecha BETWEEN valid_from AND valid_to"}}
     DIM --> JOIN
     JOIN -->|"MERGE por clave de negocio<br/>acotado al rango"| FACT["SILVER<br/>{tenant}/fact_deliveries"]
@@ -140,11 +215,14 @@ flowchart TD
     FACT --> CHECKS{{"checks de calidad<br/>critical · warning · info"}}
     CHECKS -->|"se registran siempre"| QL["shared/quality_logs"]
     CHECKS -->|"si no hay críticos fallidos<br/>(o fail_on_critical=false)"| GOLD["GOLD<br/>{tenant}/daily_metrics_by_delivery_type<br/>{tenant}/top_materials_by_month<br/>recálculo del rango"]
+    GOLD -->|"agregación independiente de Silver"| GCHECK{{"check de Gold"}}
+    GCHECK -->|"se registra"| QL
 ```
 
 | Capa | Tabla | Escritura | Partición |
 |---|---|---|---|
 | Bronze | `deliveries` | Overwrite del rango de fechas (`replaceWhere`) | `fecha_proceso` |
+| Bronze | `materials` | Overwrite completo (el catálogo llega como snapshot) | — |
 | Silver | `fact_deliveries` | `MERGE` por `(tenant_id, fecha_proceso, transporte, ruta, material, tipo_entrega)` | `fecha_proceso` |
 | Silver | `dim_materials` | `MERGE` SCD2 por `(material, valid_from)`; la historia nunca se borra | — |
 | Gold | `daily_metrics_by_delivery_type` | Recálculo del rango (`replaceWhere`) | — (ver D1) |
@@ -170,8 +248,11 @@ Un ranking mensual calculado con parte de un mes sería incorrecto, así que el 
 
 Puntos clave:
 
-- **Aislamiento multi-tenant** por ruta (`<layer>/<tenant>/<table>`), equivalente a un schema por
-  tenant en Unity Catalog (`saas_<env>.<layer>_<tenant>.<table>`).
+- **Aislamiento multi-tenant** por ruta (`<layer>/<tenant>/<table>`) o, con
+  `storage.mode=catalog`, por schema de Unity Catalog (`saas_<env>.<layer>_<tenant>.<table>`):
+  las capas reciben una referencia de tabla y no saben cuál de los dos usan.
+- **Cada capa lee solo la anterior**: también el catálogo de materiales pasa por Bronze antes de
+  llegar a `dim_materials`.
 - **Join temporal**: cada entrega toma la versión del material vigente en su `fecha_proceso`, no la
   actual. Un material sin versión vigente va a cuarentena, no se pierde en el join.
 - **Cuarentena con todos los motivos** de una fila (`non_positive_cantidad;material_not_in_catalog`).
@@ -203,6 +284,8 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `execution.fail_fast` | `false` | Abortar `--tenant all` ante el primer fallo |
 | `quality.fail_on_critical` | `false` (`true` en `main`) | Detener el tenant antes de Gold si falla un check crítico |
 | `quality.max_quarantine_rate` | `0.05` | Umbral del warning de tasa de cuarentena |
+| `storage.mode` | `path` | `path`: tablas por ruta (layout de 5.2); `catalog`: nombres de Unity Catalog |
+| `storage.catalog` | `saas_${env}` | Catálogo usado en modo `catalog` |
 | `gold.top_materials_n` | `5` | Materiales por tenant y mes en `top_materials_by_month` |
 | `business.units_per_case` | `20` | Factor CS → ST |
 | `business.routine_delivery_types` / `bonus_delivery_types` | `[ZPRE, ZVE1]` / `[Z04, Z05]` | Tipos válidos; el resto se descarta |
@@ -231,9 +314,15 @@ CLI                           --start-date, --end-date y overrides clave=valor
 | `material_version_enriched` | Silver | critical | Toda fila encontró su versión de material en el join temporal |
 | `single_current_version` | Silver | critical | SCD2: exactamente una versión vigente por material |
 | `no_overlapping_versions` | Silver | critical | SCD2: las versiones de un material no se solapan |
+| `no_version_gaps` | Silver | warning | SCD2: no hay fechas sin versión vigente entre dos versiones de un material |
 | `row_reconciliation` | Silver | critical | Leídas = duplicados + descartadas + cuarentena + escritas |
 | `quarantine_rate` | Silver | warning | La cuarentena no supera `max_quarantine_rate` |
 | `discarded_delivery_types` | Silver | info | Cuántas filas se descartaron por tipo de entrega |
+| `gold_reconciles_with_silver` | Gold | critical | Cada día y tipo de entrega de Gold suma las mismas unidades e ingreso que Silver (agregación independiente) |
+
+Los checks de Bronze y Silver se ejecutan **antes** de Gold y, con `fail_on_critical`, impiden
+publicarlo. El de Gold se ejecuta **después** de escribirlo: detecta una agregación incorrecta y
+marca el tenant como fallido, pero no puede impedir la publicación.
 
 Cada corrida agrega sus resultados a `quality_logs` con el esquema de la sección 5.9 (`_run_id`,
 `_batch_id`, `tenant_id`, `layer`, `table_name`, `check_name`, `check_severity`,
@@ -254,7 +343,7 @@ y secret scope. Detalle en [docs/onboarding-tenant.md](docs/onboarding-tenant.md
 
 ```
 saas-data-platform/
-├── .github/workflows/ci.yml    CI: ruff, validación de YAML y pytest
+├── .github/workflows/ci.yml    CI: ruff, validación de YAML, pytest y armado del wheel
 ├── config/                     configuración jerárquica (base, env, tenants)
 ├── data/raw/                   CSV de entrada (el resto de data/ se genera y no se versiona)
 ├── docs/
@@ -266,16 +355,17 @@ saas-data-platform/
 │   ├── good_code.py            refactor
 │   └── code_review.md          revisión y nota al junior
 ├── notebooks/demo.ipynb        notebook de la demo
+├── scripts/                    validación del snippet de Terraform (make infra-validate)
 ├── src/saas_pipeline/
 │   ├── cli.py                  entrada de línea de comandos
-│   ├── config.py               carga, validación y rutas
+│   ├── config.py               carga y validación; ubicación de cada tabla (ruta o nombre UC)
 │   ├── pipeline.py             orquestación por tenant y fail_fast
 │   ├── session.py              SparkSession local o la activa de Databricks
-│   ├── storage.py              escrituras Delta (replaceWhere, MERGE)
+│   ├── storage.py              lectura y escritura Delta por ruta o por nombre (replaceWhere, MERGE)
 │   ├── bronze.py · silver.py · gold.py
 │   └── quality.py              checks, quality_logs y puerta de calidad
 ├── tests/                      pytest
-├── Makefile                    setup, lint, test, run, notebook, clean
+├── Makefile                    setup, lint, test, run, notebook, infra-validate, clean
 ├── pyproject.toml · uv.lock    dependencias fijadas
 └── .pre-commit-config.yaml     ruff antes de cada commit
 ```
@@ -283,18 +373,65 @@ saas-data-platform/
 Cada capa separa las transformaciones puras (`DataFrame -> DataFrame`, probadas con datos en
 memoria) de la función `run()`, la única que lee y escribe.
 
+**Diferencias con la estructura sugerida (Anexo B).** Están todos los archivos del anexo; se
+agregan:
+
+- `data/raw/` **versionado**: el anexo pide no versionar el contenido de `data/` porque se genera
+  al ejecutar. Los dos CSV de entrada sí se versionan (son pequeños y sin ellos el repo no es
+  reproducible); todo lo generado (`bronze/`, `silver/`, `gold/`, cuarentenas, `shared/`) está en
+  `.gitignore` y además puede vivir fuera del repo con `SAAS_DATA_ROOT`.
+- `src/saas_pipeline/`: `pipeline.py` (orquestación por tenant), `session.py` (sesión de Spark)
+  y `storage.py` (lectura y escritura Delta por ruta o por nombre), para que las capas no repitan
+  esa lógica.
+- `tests/`: además de los dos del anexo, tests de configuración, Bronze, Gold, de punta a punta,
+  del modo `catalog` y de la mentoría.
+- Un YAML por cada uno de los 6 tenants del dataset (el anexo muestra solo `sv.yaml`).
+- `notebooks/` (demo), `scripts/` (validación de Terraform), `uv.lock` y `.python-version`
+  (entorno reproducible) y `.pre-commit-config.yaml` (bonus).
+
 ## Qué dejé fuera y por qué
 
-| Fuera de alcance | Por qué | Dónde se retoma |
+Primero se completó y probó todo el alcance obligatorio; los bonus se evaluaron después, por costo
+y por valor para la entrega.
+
+### Bonus incluidos
+
+| Bonus | Por qué se incluyó | Dónde |
 |---|---|---|
-| Segunda tabla Gold | **Incluido** (era bonus): `top_materials_by_month`, top N materiales por revenue por tenant y mes | Ver "Segunda tabla Gold" |
-| Ingesta con Auto Loader / streaming | Bonus. El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
-| Dashboard | Bonus. El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
-| Terraform funcional (`plan` contra una cuenta real) | Bonus. Requiere una suscripción de Azure y un workspace; se entrega el módulo ilustrativo pedido | `docs/infra.md` |
-| Ejecución en Databricks | El enunciado pide demostrarlo localmente; el código es compatible (reusa la sesión activa, sin rutas absolutas) | `observations.md` H5 |
-| Framework de calidad (Great Expectations, DLT expectations) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
+| Segunda tabla Gold | Reutiliza Silver tal cual y muestra criterio (recálculo por mes completo, SCD2 dentro del mes) con poco código | `top_materials_by_month`, ver "Segunda tabla Gold" |
+| Pre-commit hooks | Costo casi nulo; evita commits que el CI rechazaría y versionar salidas del notebook | `.pre-commit-config.yaml` |
+| Terraform funcional (**parcial**) | Hecho: `terraform fmt` y `terraform validate` pasan contra los providers reales (azurerm 4.x, databricks 1.x), lo que verifica sintaxis, tipos y atributos. Falta: `terraform plan`, que necesita credenciales de una suscripción de Azure y un workspace de Databricks | `docs/infra.md`, `make infra-validate` |
+
+### Fuera de alcance
+
+| Elemento | Por qué | Dónde se retoma |
+|---|---|---|
+| Ingesta con Auto Loader / streaming (bonus) | El CSV es un archivo estático; Auto Loader aporta valor con llegadas continuas | `observations.md` H2 |
+| Dashboard (bonus) | El notebook de demo cubre la visualización para la sustentación | `observations.md` H4 |
+| `terraform plan` contra una cuenta real (resto del bonus de Terraform) | Requiere una suscripción de Azure y un workspace de Databricks, con su costo, para una prueba que se demuestra en local | `docs/infra.md` |
+| Ejecución en un workspace de Databricks | El enunciado pide demostrarlo localmente; el código está preparado (ver "Ejecutar en Databricks") pero no se validó en un workspace real | `observations.md` H5 y H8 |
+| Framework de calidad (Great Expectations, expectations de pipelines declarativos) | Los checks propios cumplen el esquema de 5.9 sin otra dependencia | `observations.md` H2 |
 | Paralelismo entre tenants | Con este volumen el tiempo es costo fijo de Spark/Delta; en producción, una tarea por tenant | `observations.md` H5 |
-| Pre-commit hooks | **Incluido** (era bonus): bajo costo y evita commits que el CI rechazaría | — |
+| MongoDB / Couchbase | Están en el stack como "provisto en arquitectura"; la prueba trabaja con CSV | `observations.md` H7 |
+
+### Limitaciones conocidas
+
+Comportamientos actuales que conviene conocer antes de llevar esto a producción:
+
+- **Filas de un país sin tenant configurado.** Si el CSV trae un `pais` que no tiene
+  `config/tenants/<code>.yaml`, esas filas no se procesan (quedan en RAW) y hoy ningún check lo
+  avisa. Es coherente con el onboarding explícito, pero falta un check de "filas sin tenant" a
+  nivel de corrida.
+- **El SCD2 depende de que la fuente traiga la historia.** El catálogo ya llega con `valid_from` y
+  `valid_to`. Si una fuente enviara solo la versión nueva sin cerrar la anterior, el check crítico
+  de solapamiento lo detecta, pero el pipeline no cierra la versión vieja automáticamente
+  (`observations.md` A9 y H1).
+- **Sin evolución de esquema automática.** Agregar una columna a una tabla existente (por ejemplo,
+  una métrica nueva en Gold) requiere una migración explícita o `mergeSchema`: a propósito, las
+  escrituras con `replaceWhere` y `MERGE` fallan si el esquema cambia. Las excepciones son las dos
+  tablas de Bronze que se reconstruyen enteras en cada corrida: la cuarentena y `materials`.
+- **`dim_materials` nunca borra versiones.** Una versión cargada por error se corrige de forma
+  explícita (cerrándola o borrándola con un cambio deliberado), no se pisa en la siguiente corrida.
 
 ## Convenciones
 
