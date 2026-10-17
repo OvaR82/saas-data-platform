@@ -50,7 +50,7 @@ Es una buena base: los problemas están en **cómo** se ejecuta, no en **qué** 
 
 ## 1. Publica datos incorrectos sin avisar — **Alta**
 
-**Qué está mal.** Ninguna fila se valida antes de calcular:
+**Qué está mal aplicado.** Ninguna fila se valida antes de calcular:
 - Cualquier `unidad` distinta de `CS` se trata como `ST` (líneas 14–15): una unidad desconocida
   (`KG`, `PK`, vacía) se suma como si fueran unidades sueltas.
 - Cantidades negativas, en cero o nulas, precios nulos y fechas nulas o inválidas se publican tal
@@ -75,7 +75,7 @@ su `reject_reason` y el script registra cuántas hubo de cada motivo.
 
 ## 2. Procesa en pandas, fila por fila, en una sola máquina — **Alta**
 
-**Qué está mal.** `pd.read_csv` (línea 7) carga todo el archivo en la memoria de un solo proceso,
+**Qué está mal aplicado.** `pd.read_csv` (línea 7) carga todo el archivo en la memoria de un solo proceso,
 `iterrows()` (línea 10) recorre fila por fila en Python, y al final (líneas 23–24) se copia todo
 a Spark solo para escribir.
 
@@ -89,7 +89,7 @@ pasa por un bucle de Python.
 
 ## 3. Se rompe con un país sin datos y no maneja errores — **Alta**
 
-**Qué está mal.** Si el filtro de la línea 8 no deja filas, `pd.DataFrame([])` queda sin columnas
+**Qué está mal aplicado.** Si el filtro de la línea 8 no deja filas, `pd.DataFrame([])` queda sin columnas
 y `spark.createDataFrame` (línea 24) falla. No hay ningún manejo de errores y el resultado se
 anuncia con `print("done")` (línea 26).
 
@@ -103,7 +103,7 @@ algo falla, para que el orquestador lo detecte.
 
 ## 4. Escritura no idempotente ni atómica, y en `/tmp` — **Alta**
 
-**Qué está mal.** `write.mode("overwrite").parquet("/tmp/output/" + country)` (línea 25).
+**Qué está mal aplicado.** `write.mode("overwrite").parquet("/tmp/output/" + country)` (línea 25).
 
 **Por qué importa.**
 - **No es idempotente de forma confiable:** reejecutar con la misma entrada da el mismo resultado
@@ -128,7 +128,7 @@ df.write.format("delta").mode("overwrite") \
 
 ## 5. Reglas de negocio y rutas escritas en el código — **Media**
 
-**Qué está mal.** Los tipos `"ZPRE"`/`"ZVE1"` (línea 11), el factor `20` (línea 13), la ruta
+**Qué está mal aplicado.** Los tipos `"ZPRE"`/`"ZVE1"` (línea 11), el factor `20` (línea 13), la ruta
 `/tmp/output/` (línea 25) y la llamada con `"data.csv"`, `"GT"` (línea 29).
 
 **Por qué importa.** Cambiar el tipo de entrega, el factor de un país o el ambiente obliga a
@@ -142,7 +142,7 @@ ambiente y por tenant.
 
 ## 6. Ejecuta trabajo al importar el módulo — **Media**
 
-**Qué está mal.** La `SparkSession` se crea a nivel de módulo (línea 4) y `process(...)` se llama
+**Qué está mal aplicado.** La `SparkSession` se crea a nivel de módulo (línea 4) y `process(...)` se llama
 al final del archivo (línea 29), fuera de un `if __name__ == "__main__":`.
 
 **Por qué importa.** Basta con hacer `import bad_code` (por ejemplo, desde un test) para que arranque
@@ -153,7 +153,7 @@ ejecución detrás de `if __name__ == "__main__": sys.exit(main())`.
 
 ## 7. Tipos inferidos y `float` para dinero — **Media**
 
-**Qué está mal.** `pd.read_csv` (línea 7) adivina los tipos.
+**Qué está mal aplicado.** `pd.read_csv` (línea 7) adivina los tipos.
 
 **Por qué importa.** 🔎 `precio` y `cantidad` se leen como `float64`: el precio
 `16.115560169153356500` se convierte en `16.115560169153355`. En sumas de millones de filas esos
@@ -165,7 +165,7 @@ errores de redondeo se acumulan en los ingresos. `fecha_proceso` queda como text
 
 ## 8. Multi-tenant resuelto con un literal sensible a mayúsculas — **Media**
 
-**Qué está mal.** El país llega como literal (`"GT"`, línea 29) y se compara exacto con la columna
+**Qué está mal aplicado.** El país llega como literal (`"GT"`, línea 29) y se compara exacto con la columna
 (línea 8).
 
 **Por qué importa.** La convención de la plataforma es el código de tenant en minúscula; si alguien
@@ -176,7 +176,7 @@ normalizar la columna de origen (`lower(trim(pais))`) antes de comparar.
 
 ## 9. Legibilidad — **Baja**
 
-**Qué está mal.**
+**Qué está mal aplicado.**
 - Nombres poco descriptivos o inconsistentes: `fecha` en lugar de `fecha_proceso`, `total` (es
   ingreso), `out`, `sdf`; la variable `i` (línea 10) no se usa.
 - Sin type hints ni docstring en `process` (línea 6).
@@ -192,7 +192,7 @@ prueba sin archivos) de la lectura y escritura (`process`); nombres que digan lo
 
 ## 10. Sin pruebas — **Media**
 
-**Qué está mal.** No hay ninguna prueba, y la estructura actual (observación 6) impide escribirlas.
+**Qué está mal aplicado.** No hay ninguna prueba, y la estructura actual (observación 6) impide escribirlas.
 
 **Por qué importa.** Nada garantiza que el factor 20 o el filtro de rutina sigan funcionando
 después del próximo cambio.
@@ -208,7 +208,8 @@ falla.
 
 Lo haría en una **conversación 1:1 o una sesión de pair programming**, no solo con comentarios en
 el PR. Empezaría por lo que está bien: entendió la regla de negocio, y eso es lo más difícil de
-aprender. Después daría el feedback con el formato **situación → comportamiento → impacto** y con
+aprender. Le preguntaría el porqué lo resolvió de esa manera.
+Después daría el feedback con el formato **situación → comportamiento → impacto** y con
 evidencia concreta: "con GT, este script publica un total negativo y dos filas sin fecha".
 
 En vez de diez comentarios a la vez, **priorizaría tres**: no publicar datos inválidos en silencio,
