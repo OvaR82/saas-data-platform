@@ -1,17 +1,19 @@
-"""Refactor of mentoring/bad_code.py.
+"""Refactor of bad_code.py, written to be read next to the original.
 
-Same business intent as the original: for one tenant, keep the routine deliveries
-(ZPRE, ZVE1), express the quantity in units (1 CS = 20 ST) and compute the revenue.
-
-What changed and why is explained in mentoring/code_review.md. In short:
-- Spark end to end (no pandas, no row-by-row loop) and an explicit schema.
-- Business rules and paths come from the project configuration, not from literals.
+Same business rule: for one tenant, keep the routine deliveries (ZPRE, ZVE1), express the
+quantity in units (1 CS = 20 ST) and compute the total. What changed, and why:
+- Spark end to end, by columns: no pandas, no row loop. It scales and runs where the data is.
+- Explicit schema with decimals: money is never a float, and a changed header fails loudly.
 - Invalid rows are rejected with a reason and counted, never published silently.
-- Idempotent Delta write scoped to the processed date range.
-- No side effects on import; reuses the tested helpers of the saas_pipeline package.
+- Atomic Delta overwrite of the tenant's table: running it twice gives the same result, and a
+  crash halfway leaves the previous version intact.
+- Paths and tenant are arguments, nothing runs on import, errors are logged with an exit code.
+In the pipeline (src/saas_pipeline) the constants below come from the configuration and the unit
+conversion is a shared, tested function; here they stay inline so the script is self-contained.
 
-Usage (from the repository root):
-    uv run python mentoring/good_code.py --tenant gt --start-date 2025-03-01 --end-date 2025-03-31
+Usage:
+    python mentoring/good_code.py --input data/raw/global_mobility_data_entrega_productos.csv \\
+        --output data/mentoring/routine_deliveries --tenant gt
 """
 
 from __future__ import annotations
@@ -20,122 +22,92 @@ import argparse
 import logging
 import sys
 
-from omegaconf import DictConfig
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from saas_pipeline.bronze import is_valid_process_date
-from saas_pipeline.config import ENVIRONMENTS, load_config, to_partition_value
-from saas_pipeline.session import get_spark
-from saas_pipeline.silver import normalize_code, normalize_units
-from saas_pipeline.storage import TableRef, overwrite_date_range
-
 log = logging.getLogger(__name__)
 
-# Explicit contract of the source file: money and quantities as decimals, never floats.
-DELIVERIES_SCHEMA = (
+SCHEMA = (
     "pais string, fecha_proceso string, transporte long, ruta long, tipo_entrega string, "
     "material string, precio decimal(38,18), cantidad decimal(38,18), unidad string"
 )
+ROUTINE_TYPES = ("ZPRE", "ZVE1")
+UNITS_PER_CASE = 20
 
 
-def read_deliveries(spark: SparkSession, path: str) -> DataFrame:
-    """Read the deliveries CSV with the explicit schema; fails if the header changes."""
-    return (
-        spark.read.option("header", True)
-        .option("enforceSchema", False)
-        .schema(DELIVERIES_SCHEMA)
-        .csv(path)
+def routine_deliveries(df: DataFrame, tenant: str) -> tuple[DataFrame, DataFrame]:
+    """Split one tenant's routine deliveries into (valid rows, rows rejected with a reason)."""
+    rows = (
+        df.filter(F.lower(F.trim("pais")) == tenant)  # tenant codes are lowercase
+        .filter(F.upper(F.trim("tipo_entrega")).isin(*ROUTINE_TYPES))
+        .dropDuplicates()
     )
-
-
-def routine_deliveries(
-    df: DataFrame, tenant: str, routine_types: list[str], units_per_case: int
-) -> tuple[DataFrame, DataFrame]:
-    """Split one tenant's routine deliveries into (valid, rejected).
-
-    valid: tenant_id, fecha_proceso, material, cantidad_normalizada_st, revenue.
-    rejected: the original columns plus reject_reason.
-    """
-    # Tenant codes are lowercase by convention; normalize the source instead of trusting it.
-    rows = df.withColumn("tenant_id", F.lower(F.trim("pais"))).filter(F.col("tenant_id") == tenant)
-    # Routine deliveries only; exact duplicates are kept once.
-    routine = rows.filter(normalize_code("tipo_entrega").isin(*routine_types)).dropDuplicates()
-    # Shared, tested rule: CS -> ST, any other unit becomes null.
-    with_units = normalize_units(routine, units_per_case)
-
-    # First failing rule wins here: this script only needs to know that a row is unusable.
+    unit = F.upper(F.trim("unidad"))
+    # CS -> ST; any other unit gives null and is rejected (bad_code.py counted it as ST).
+    units = F.when(unit == "CS", F.col("cantidad") * UNITS_PER_CASE).when(
+        unit == "ST", F.col("cantidad")
+    )
     reason = (
-        F.when(~is_valid_process_date(F.col("fecha_proceso")), "invalid_fecha_proceso")
+        F.when(F.try_to_timestamp("fecha_proceso", F.lit("yyyyMMdd")).isNull(), "invalid_fecha")
         .when(F.col("cantidad").isNull() | (F.col("cantidad") <= 0), "invalid_cantidad")
-        .when(F.col("cantidad_normalizada_st").isNull(), "invalid_unidad")
+        .when(units.isNull(), "invalid_unidad")
         .when(F.col("precio").isNull(), "null_precio")
     )
-    tagged = with_units.withColumn("reject_reason", reason)
-
+    tagged = rows.withColumn("cantidad_st", units).withColumn("reject_reason", reason)
     valid = tagged.filter(F.col("reject_reason").isNull()).select(
-        "tenant_id",
+        "pais",
         "fecha_proceso",
         "material",
-        "cantidad_normalizada_st",
-        (F.col("cantidad_normalizada_st") * F.col("precio")).alias("revenue"),
+        "cantidad_st",
+        (F.col("cantidad_st") * F.col("precio")).alias("total"),
     )
-    rejected = tagged.filter(F.col("reject_reason").isNotNull())
-    return valid, rejected
+    return valid, tagged.filter(F.col("reject_reason").isNotNull())
 
 
-def run(spark: SparkSession, cfg: DictConfig) -> dict[str, int]:
-    """Process the configured tenant and date range; return the row counts."""
-    tenant = cfg.tenant.code
-    start = to_partition_value(cfg.execution.start_date)
-    end = to_partition_value(cfg.execution.end_date)
-    output_path = f"{cfg.paths.root}/mentoring/{tenant}/routine_deliveries"
-
-    deliveries = read_deliveries(spark, f"{cfg.paths.raw}/{cfg.sources.deliveries}")
-    valid, rejected = routine_deliveries(
-        deliveries, tenant, cfg.business.routine_delivery_types, cfg.business.units_per_case
+def process(spark: SparkSession, input_path: str, output_path: str, tenant: str) -> dict[str, int]:
+    """Read the CSV, keep the tenant's routine deliveries and write them as a Delta table."""
+    source = (
+        spark.read.option("header", True)
+        .option("enforceSchema", False)
+        .schema(SCHEMA)
+        .csv(input_path)
     )
-    in_range = valid.filter(F.col("fecha_proceso").between(start, end))
-    # Rejects of this run: undated rows (no range applies) plus dated rows inside the range.
-    rejected = rejected.filter(
-        ~is_valid_process_date(F.col("fecha_proceso")) | F.col("fecha_proceso").between(start, end)
-    )
-
-    # Delta + replaceWhere: re-running the same range replaces it, other dates are untouched.
-    overwrite_date_range(in_range, TableRef(path=output_path), start, end)
-
-    # Rejected rows are not published, but they are visible: counted by reason in the log.
+    valid, rejected = routine_deliveries(source, tenant)
+    valid.write.format("delta").mode("overwrite").save(f"{output_path}/{tenant}")
     for row in rejected.groupBy("reject_reason").count().collect():
         log.warning("[%s] rejected %s rows: %s", tenant, row["count"], row["reject_reason"])
-    counts = {"written": in_range.count(), "rejected": rejected.count()}
-    log.info("[%s] routine deliveries -> %s %s", tenant, output_path, counts)
+    counts = {"written": valid.count(), "rejected": rejected.count()}
+    log.info("[%s] routine deliveries -> %s/%s %s", tenant, output_path, tenant, counts)
     return counts
+
+
+def get_spark() -> SparkSession:
+    """The cluster's session on Databricks; locally, one with Delta Lake enabled."""
+    if spark := SparkSession.getActiveSession():
+        return spark
+    from delta import configure_spark_with_delta_pip
+
+    builder = SparkSession.builder.config(
+        "spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension"
+    ).config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+    return configure_spark_with_delta_pip(builder).getOrCreate()
 
 
 def main(argv: list[str] | None = None) -> int:
     """Command line entry point; returns a process exit code."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--env", choices=ENVIRONMENTS, default="dev")
-    parser.add_argument("--tenant", required=True, help="Lowercase tenant code, e.g. gt")
-    parser.add_argument("--start-date", help="First fecha_proceso, YYYY-MM-DD")
-    parser.add_argument("--end-date", help="Last fecha_proceso, YYYY-MM-DD")
+    parser.add_argument("--input", required=True, help="Deliveries CSV")
+    parser.add_argument("--output", required=True, help="Base folder; the tenant is appended")
+    parser.add_argument("--tenant", required=True, help="Tenant code, e.g. gt")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-
-    # Dates are optional: when omitted, the range of the configuration is used.
-    overrides = [
-        f"execution.{key}={value}"
-        for key, value in (("start_date", args.start_date), ("end_date", args.end_date))
-        if value
-    ]
     try:
-        run(get_spark("mentoring-good-code"), load_config(args.env, args.tenant, overrides))
+        process(get_spark(), args.input, args.output, args.tenant.lower())
     except Exception:
         log.exception("Processing failed for tenant %s", args.tenant)
         return 1
     return 0
 
 
-# Nothing runs on import: the module can be imported by tests and other code safely.
-if __name__ == "__main__":
+if __name__ == "__main__":  # nothing runs on import: tests and other code can reuse the functions
     sys.exit(main())

@@ -7,10 +7,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COLUMNS = (
-    "pais string, fecha_proceso string, transporte long, ruta long, tipo_entrega string, "
-    "material string, precio decimal(38,18), cantidad decimal(38,18), unidad string"
-)
+DELIVERIES_CSV = (REPO_ROOT / "data/raw/global_mobility_data_entrega_productos.csv").as_posix()
 
 
 @pytest.fixture(scope="module")
@@ -48,18 +45,21 @@ def row(
 
 
 def test_keeps_the_original_business_rules(spark, good_code):
-    """Routine only, CS x 20, revenue = units x price, and 'GT'/'gt' are the same tenant."""
+    """Routine only, CS x 20, total = units x price, and 'GT'/'gt' are the same tenant."""
     rows = [
-        row(unit="CS", route=1),  # 2 CS -> 40 ST, revenue 60
+        row(unit="CS", route=1),  # 2 CS -> 40 ST, total 60
         row(country="gt", unit="ST", quantity="5", route=2),  # lowercase source still matches
         row(delivery_type="Z04", route=3),  # bonus: not part of this report
         row(country="SV", route=4),  # another tenant
     ]
-    df = spark.createDataFrame(rows, COLUMNS)
-    valid, rejected = good_code.routine_deliveries(df, "gt", ["ZPRE", "ZVE1"], 20)
+    valid, rejected = good_code.routine_deliveries(
+        spark.createDataFrame(rows, good_code.SCHEMA), "gt"
+    )
 
-    out = {r.cantidad_normalizada_st: r.revenue for r in valid.collect()}
-    assert out == {Decimal(40): Decimal(60), Decimal(5): Decimal("7.5")}
+    assert {r.cantidad_st: r.total for r in valid.collect()} == {
+        Decimal(40): Decimal(60),
+        Decimal(5): Decimal("7.5"),
+    }
     assert rejected.count() == 0
 
 
@@ -75,32 +75,28 @@ def test_rejects_what_the_original_published_silently(spark, good_code):
         row(route=7),
         row(route=7),  # exact duplicate: kept once
     ]
-    df = spark.createDataFrame(rows, COLUMNS)
-    valid, rejected = good_code.routine_deliveries(df, "gt", ["ZPRE", "ZVE1"], 20)
+    valid, rejected = good_code.routine_deliveries(
+        spark.createDataFrame(rows, good_code.SCHEMA), "gt"
+    )
 
-    assert [r.cantidad_normalizada_st for r in valid.collect()] == [Decimal(40)]
-    reasons = {r.ruta: r.reject_reason for r in rejected.collect()}
-    assert reasons == {
+    assert [r.cantidad_st for r in valid.collect()] == [Decimal(40)]
+    assert {r.ruta: r.reject_reason for r in rejected.collect()} == {
         1: "invalid_cantidad",
         2: "invalid_cantidad",
         3: "invalid_unidad",
         4: "null_precio",
-        5: "invalid_fecha_proceso",
-        6: "invalid_fecha_proceso",
+        5: "invalid_fecha",
+        6: "invalid_fecha",
     }
 
 
-def test_run_is_idempotent_and_an_empty_tenant_does_not_crash(spark, good_code, make_cfg):
-    """Re-running does not duplicate rows; a range without data writes an empty result."""
-    cfg = make_cfg(tenant="gt")
-    first = good_code.run(spark, cfg)
-    second = good_code.run(spark, cfg)
-    assert first == second
-    output = spark.read.format("delta").load(f"{cfg.paths.root}/mentoring/gt/routine_deliveries")
-    assert output.count() == first["written"]
+def test_process_is_idempotent_and_an_empty_tenant_does_not_crash(spark, good_code, tmp_path):
+    """Re-running does not duplicate rows; a tenant without rows writes an empty table."""
+    output = tmp_path.as_posix()
+    first = good_code.process(spark, DELIVERIES_CSV, output, "gt")
+    second = good_code.process(spark, DELIVERIES_CSV, output, "gt")
 
+    assert first == second
+    assert spark.read.format("delta").load(f"{output}/gt").count() == first["written"]
     # bad_code.py raised IndexError when the filter left no rows; here it is just zero rows.
-    empty = make_cfg(
-        "execution.start_date=2024-01-01", "execution.end_date=2024-01-31", tenant="gt"
-    )
-    assert good_code.run(spark, empty)["written"] == 0
+    assert good_code.process(spark, DELIVERIES_CSV, output, "cr") == {"written": 0, "rejected": 0}

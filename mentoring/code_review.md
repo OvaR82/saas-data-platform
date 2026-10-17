@@ -70,7 +70,8 @@ qty = F.when(F.col("unidad") == "CS", F.col("cantidad") * units_per_case) \
        .when(F.col("unidad") == "ST", F.col("cantidad"))   # cualquier otra unidad -> null -> rechazo
 ```
 
-En `good_code.py`: `routine_deliveries()` devuelve `(valid, rejected)` con `reject_reason`.
+En `good_code.py`: `routine_deliveries()` devuelve `(valid, rejected)`; cada fila rechazada lleva
+su `reject_reason` y el script registra cuántas hubo de cada motivo.
 
 ## 2. Procesa en pandas, fila por fila, en una sola máquina — **Alta**
 
@@ -114,8 +115,10 @@ algo falla, para que el orquestador lo detecte.
   la carpeta vacía.
 - **`/tmp` es efímero:** se borra al reiniciar la máquina o el cluster.
 
-**Cómo se corrige.** Escribir en **Delta Lake** (transaccional: o se escribe todo o nada) y
-reemplazar solo el rango procesado:
+**Cómo se corrige.** Escribir en **Delta Lake**, que es transaccional: o se escribe todo o nada,
+y un lector nunca ve la tabla a medias. Como este script recalcula el tenant completo, basta un
+`overwrite` atómico (es lo que hace `good_code.py`): correrlo dos veces da el mismo resultado.
+Cuando se procesa por rango de fechas, se reemplaza solo ese rango, como hace el pipeline:
 
 ```python
 df.write.format("delta").mode("overwrite") \
@@ -131,8 +134,11 @@ df.write.format("delta").mode("overwrite") \
 **Por qué importa.** Cambiar el tipo de entrega, el factor de un país o el ambiente obliga a
 modificar y redesplegar código. Es fácil que dos scripts terminen con reglas distintas.
 
-**Cómo se corrige.** Leerlos desde la configuración del proyecto (`business.routine_delivery_types`,
-`business.units_per_case`, `paths.*`), que además cambia por ambiente y por tenant.
+**Cómo se corrige.** Como primer paso, constantes con nombre al inicio del archivo
+(`ROUTINE_TYPES`, `UNITS_PER_CASE`) y rutas y tenant por argumento: es lo que hace `good_code.py`.
+En el pipeline, esos valores salen de la configuración del proyecto
+(`business.routine_delivery_types`, `business.units_per_case`, `paths.*`), que además cambia por
+ambiente y por tenant.
 
 ## 6. Ejecuta trabajo al importar el módulo — **Media**
 
@@ -180,9 +186,9 @@ normalizar la columna de origen (`lower(trim(pais))`) antes de comparar.
 **Por qué importa.** El código se lee más veces de las que se escribe; nombres claros y funciones
 con una sola responsabilidad hacen que el siguiente cambio sea seguro.
 
-**Cómo se corrige.** Separar lectura (`read_deliveries`), transformación (`routine_deliveries`) y
-escritura (`run`); nombres que digan lo que contienen (`revenue`, `cantidad_normalizada_st`);
-`logging` con el tenant en cada mensaje.
+**Cómo se corrige.** Separar la transformación (`routine_deliveries`, una función pura que se
+prueba sin archivos) de la lectura y escritura (`process`); nombres que digan lo que contienen
+(`fecha_proceso` en vez de `fecha`, `cantidad_st`); `logging` con el tenant en cada mensaje.
 
 ## 10. Sin pruebas — **Media**
 
