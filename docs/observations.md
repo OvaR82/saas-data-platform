@@ -1,7 +1,18 @@
 # Observaciones a la arquitectura provista
 
-> Borrador vivo: cada decisión se registra en el momento en que se toma. Formato tipo ADR:
-> contexto → lo que dice la arquitectura → problema → decisión/propuesta → trade-offs.
+Registro de las decisiones tomadas sobre la arquitectura provista (sección 5 del enunciado). Cada
+entrada sigue un formato tipo ADR: contexto → lo que dice la arquitectura → problema →
+decisión o propuesta → trade-offs. Ninguna discrepancia se implementó en contra de la arquitectura
+sin dejarla registrada aquí.
+
+| Tipo | Entradas | Qué contiene |
+|---|---|---|
+| Ambigüedades resueltas | A1–A11 | Huecos del enunciado y cómo se resolvieron en el código |
+| Desacuerdos | D1–D5 | Decisiones provistas que cambiaría, con alternativa y trade-offs |
+| Mejoras (Horizonte 2-3) | H1–H6 | Evolución tecnológica propuesta |
+
+Las tres más relevantes para discutir: **A8** (reprocesos que borran de Silver), **D3**
+(aislamiento por schema frente a catálogo) y **D5** (la clave de negocio no identifica una entrega).
 
 ## Ambigüedades resueltas en la implementación
 
@@ -61,7 +72,7 @@
 ## Desacuerdos con la arquitectura (propuesta alternativa)
 
 ### D1. Particionado de Gold por fecha
-- Gold `daily_metrics_by_delivery_type` tiene ~4 filas por día y tenant (≈130 filas por tenant en el semestre). Particionar por fecha generaría cientos de archivos diminutos.
+- Gold `daily_metrics_by_delivery_type` tiene ~4 filas por día y tenant (entre 100 y 126 filas por tenant en el semestre). Particionar por fecha generaría cientos de archivos diminutos.
 - **Implementado**: tabla no particionada; la idempotencia se mantiene con `replaceWhere` sobre los datos del rango (Delta lo soporta sin partición física).
 - **Propuesta**: Liquid Clustering por `fecha_proceso` en Databricks, también para Silver: evita elegir la granularidad de partición por adelantado y el problema de archivos pequeños.
 
@@ -69,7 +80,73 @@
 - **Propuesta**: `saas_<env>.shared.dim_materials` gobernado una sola vez, con vistas por tenant si se requiere aislamiento. Si en el futuro cada tenant tiene su propio catálogo, la columna `tenant_id` en la dimensión resuelve ambos casos.
 - **Trade-off**: el schema `shared` requiere grants explícitos de lectura para cada tenant.
 
+### D3. Aislamiento por schema dentro de un catálogo único
+- **Arquitectura**: un catálogo por ambiente (`saas_<env>`) y un schema por tenant (5.2).
+- **Problema**: el límite de aislamiento es el schema. Un `GRANT` mal dado a nivel de catálogo
+  (por ejemplo `USE CATALOG` + `SELECT` heredado) expone a todos los tenants a la vez. Tampoco
+  permite separar la ubicación de almacenamiento ni los costos por unidad de negocio de forma
+  nativa, algo habitual cuando los tenants son empresas distintas del grupo (CBC, Beliv, BIA).
+- **Propuesta**: catálogo por tenant y ambiente (`saas_<env>_<tenant>.bronze/silver/gold`), cada uno
+  con su *managed location* en ADLS y su propio grupo de acceso; los análisis cross-tenant se hacen
+  en un catálogo `saas_<env>_shared` con vistas que leen de los catálogos de cada tenant.
+- **Trade-offs**: más objetos que gobernar (un catálogo por tenant) y un onboarding algo más largo,
+  a cambio de un radio de impacto acotado, chargeback por tenant y aislamiento físico del
+  almacenamiento. El código no cambia: solo cambia cómo se compone el nombre de la tabla.
+
+### D4. `fail_on_critical = false` por defecto
+- **Arquitectura**: 5.8 lo define como `false` por defecto.
+- **Problema**: en producción se publicaría Gold sobre datos que fallaron una validación crítica
+  (por ejemplo, una dimensión con versiones solapadas que duplica hechos).
+- **Implementado**: `false` en `base.yaml` (respetando la arquitectura) y `true` en
+  `config/env/main.yaml`.
+- **Propuesta**: `true` por defecto también en `qa`; `false` solo en `dev` para poder depurar.
+
+### D5. La clave de negocio no identifica una entrega
+- **Arquitectura**: MERGE con clave `(tenant_id, fecha_proceso, transporte, ruta, material,
+  tipo_entrega)`.
+- **Problema**: dos entregas legítimas del mismo material, en la misma ruta, transporte y día (por
+  ejemplo, dos visitas al mismo cliente) tendrían la misma clave: la segunda sobrescribiría a la
+  primera y el MERGE fallaría si ambas llegan en el mismo lote. Además, si una corrección llega con
+  otra `fecha_proceso`, se inserta como una fila nueva en vez de actualizar la original.
+- **Evidencia**: en el dataset actual no ocurre (0 claves repetidas fuera de los duplicados
+  exactos), y el check crítico `unique_business_key` lo detectaría.
+- **Propuesta**: incorporar el identificador del documento de entrega de la fuente (número de
+  pedido o línea) a la clave. Si la fuente no lo tiene, acordar con el dueño del dato que la
+  combinación actual es única por contrato.
+
 ## Mejoras propuestas (Horizonte 2-3)
 
 ### H1. SCD2 a partir de snapshots o CDC
 Generar las versiones en el pipeline (comparar el snapshot entrante contra la versión vigente, cerrar `valid_to` e insertar la nueva) en lugar de depender de que la fuente entregue la historia ya armada. En Databricks: `APPLY CHANGES INTO ... STORED AS SCD TYPE 2` (DLT) hace esto de forma declarativa.
+
+### H2. Ingesta incremental con Auto Loader y pipelines declarativos
+Reemplazar la lectura batch del CSV por Auto Loader (`cloudFiles`): procesa solo los archivos
+nuevos, guarda el estado en un checkpoint, captura columnas inesperadas en `_rescued_data` y
+soporta evolución de esquema. Montado sobre Lakeflow Declarative Pipelines (antes DLT), las
+reglas de calidad de este repo pasan a ser *expectations* (`expect_or_drop`, `expect_or_fail`) con
+métricas integradas.
+
+### H3. Contratos de datos por fuente
+Versionar en el repo, por fuente, el esquema esperado y las reglas de calidad (hoy en código y en
+`base.yaml`) como un contrato (por ejemplo, Open Data Contract Standard). El CI valida que el
+pipeline lo cumple y un cambio de la fuente se negocia como un cambio de contrato, no se descubre
+en producción.
+
+### H4. Observabilidad sobre `quality_logs`
+La tabla ya tiene el historial de cada check por tenant y corrida. Siguiente paso: un tablero
+(Databricks SQL o Lakeview) con la tendencia de cuarentena y descartes, alertas SQL cuando un check
+crítico falla o la tasa de cuarentena se dispara, y linaje de Unity Catalog para saber qué tablas
+Gold se ven afectadas.
+
+### H5. CI/CD hacia Databricks con Asset Bundles
+Empaquetar el pipeline como Databricks Asset Bundle: un job por ambiente (`dev`, `qa`, `main`) con
+los mismos YAML de configuración, despliegue desde GitHub Actions al mergear a `main`, y pruebas de
+integración contra un workspace de `qa`. Los tenants se ejecutan en paralelo con una tarea
+`for_each` en lugar del bucle secuencial actual.
+
+### H6. Gold preparado para agentes de IA
+La segunda fase del proyecto conecta agentes de IA a los datos core. Para que respondan bien:
+comentarios de tabla y columna en Unity Catalog (son el contexto que lee el agente), *metric views*
+o una capa semántica con las definiciones oficiales (qué es "revenue", qué es "entrega de rutina"),
+vistas cross-tenant con *row filters* para que cada agente solo vea los tenants permitidos, y
+acceso a través de herramientas gobernadas (Genie, funciones de UC) en lugar de SQL libre.

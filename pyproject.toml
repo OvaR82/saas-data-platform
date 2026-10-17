@@ -19,6 +19,11 @@ dev = [
     "ruff==0.7.4",
     "pre-commit==4.0.1",
 ]
+# Only for the demo notebook; not installed by CI (`uv sync` installs `dev` only).
+demo = [
+    "jupyterlab==4.3.1",
+    "ipykernel==6.29.5",
+]
 
 [build-system]
 requires = ["hatchling"]

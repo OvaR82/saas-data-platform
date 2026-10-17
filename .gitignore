@@ -13,6 +13,9 @@ spark-warehouse/
 metastore_db/
 derby.log
 
+# Jupyter: notebooks are versioned without outputs (see .pre-commit-config.yaml)
+.ipynb_checkpoints/
+
 # IDE / OS
 .idea/
 .vscode/
