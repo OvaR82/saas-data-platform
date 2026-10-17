@@ -389,7 +389,7 @@ agregan:
 - `notebooks/` (demo), `scripts/` (validación de Terraform), `uv.lock` y `.python-version`
   (entorno reproducible) y `.pre-commit-config.yaml` (bonus).
 
-## Qué dejé fuera y por qué
+## Qué se dejó fuera y por qué
 
 Primero se completó y probó todo el alcance obligatorio; los bonus se evaluaron después, por costo
 y por valor para la entrega.
